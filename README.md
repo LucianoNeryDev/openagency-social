@@ -69,7 +69,7 @@ See [ROADMAP.md](ROADMAP.md) for what is next and
 ## Getting started
 
 Node 22 and pnpm. The database tests start a disposable PostgreSQL 17
-container, so they need Docker (or set `BANDITORE_TEST_POSTGRES_URL`, see
+container, so they need Docker (or set `SOCIAL_TEST_POSTGRES_URL`, see
 [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ```sh

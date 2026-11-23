@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Rename wave 3a, names read by other systems (the receiving side accepts both
+  names; nothing the engine sends changes): the CI database variable is now
+  `SOCIAL_TEST_POSTGRES_URL` (workflow, README and CONTRIBUTING; the test
+  fixture still falls back to `BANDITORE_TEST_POSTGRES_URL`), and the runner's
+  default `RUNNER_DATA_DIR` is `/var/lib/openagency-social-runner`. While
+  `RUNNER_DATA_DIR` is unset and the old default `/var/lib/leonessa-browser-runner`
+  exists but the new one does not, the runner keeps using the old directory and
+  logs it once, so an existing runner keeps its data. The old directory
+  fallback and the old variable name are dropped in wave 3c.
 - Renamed the remaining Banditore names: repository links
   (`github.com/LucianoNeryDev/openagency-social`), the `package.json`
   `repository` URL, the brand files (`docs/brand/social-*`) and the database

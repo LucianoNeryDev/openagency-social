@@ -19,12 +19,13 @@ const databaseName = 'leonessa_social_engine'
 
 /**
  * A PostgreSQL 17 database with migrator and runtime roles. By default it is a disposable
- * container. When BANDITORE_TEST_POSTGRES_URL names a PostgreSQL server (a superuser URL, as a CI
+ * container. When SOCIAL_TEST_POSTGRES_URL (or the deprecated BANDITORE_TEST_POSTGRES_URL) names a PostgreSQL server (a superuser URL, as a CI
  * service container provides), that server is used instead and the database and roles are dropped
  * again afterwards; migrations fix their names, so run the suites one at a time against it.
  */
 export async function postgresFixture() {
-  const external = process.env.BANDITORE_TEST_POSTGRES_URL ? new URL(process.env.BANDITORE_TEST_POSTGRES_URL) : undefined
+  const externalUrl = process.env.SOCIAL_TEST_POSTGRES_URL || process.env.BANDITORE_TEST_POSTGRES_URL
+  const external = externalUrl ? new URL(externalUrl) : undefined
   const password = randomBytes(24).toString('hex')
   const pools: pg.Pool[] = []
   let id: string | undefined
