@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-15
+- Note (2026-11-23, rename wave 3b): the headers are now `x-openagency-*` and the salt `openagency-engine-events-v1`; this ADR otherwise keeps the former names (`x-comune-*`, `comune-engine-events-v1`).
 
 ## Context
 
