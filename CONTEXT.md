@@ -1,4 +1,4 @@
-# Banditore — Domain Context
+# OpenAgency Social — Domain Context
 
 ## Purpose
 

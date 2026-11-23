@@ -1,13 +1,13 @@
-# Contributing to Banditore
+# Contributing to OpenAgency Social
 
-Issues and pull requests are welcome. Banditore is maintained for our own
-needs, so changes that fit how we run it are the most likely to be merged, and
-there is no support commitment. Report security problems privately, as
+Issues and pull requests are welcome. OpenAgency Social is maintained for our
+own needs, so changes that fit how we run it are the most likely to be merged,
+and there is no support commitment. Report security problems privately, as
 [SECURITY.txt](SECURITY.txt) describes.
 
-Banditore executes approved social media actions for many tenants. A control
-plane (a dashboard or app) owns tenants, drafts, approval and audit, and calls
-this service's API. The engine never approves work and has no user interface.
+OpenAgency Social executes approved social media actions for many tenants. A
+control plane (a dashboard or app, normally OpenAgency Portal) owns tenants,
+drafts, approval and audit, and calls this service's API. The engine never approves work and has no user interface.
 Read [CONTEXT.md](CONTEXT.md) for the vocabulary and [docs/adr/](docs/adr/) for
 the decisions behind the design before you start on anything substantial.
 

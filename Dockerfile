@@ -10,7 +10,7 @@ RUN pnpm build && pnpm prune --prod --ignore-scripts
 
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 ARG VCS_REF
-LABEL org.opencontainers.image.title="Banditore" \
+LABEL org.opencontainers.image.title="OpenAgency Social" \
       org.opencontainers.image.revision="${VCS_REF}"
 ENV NODE_ENV=production
 WORKDIR /app

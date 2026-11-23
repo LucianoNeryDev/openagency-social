@@ -113,7 +113,7 @@ describe('webhook sender', () => {
     expect(result).toEqual({ kind: 'delivered', status: 202 })
     expect(received[0]!.body).toBe('{"type":"webhook.test"}')
     expect(received[0]!.headers).toMatchObject({ 'content-type': 'application/json', 'webhook-id': 'abc', 'webhook-signature': 'v1,x',
-      'user-agent': 'Banditore-Webhooks/1' })
+      'user-agent': 'OpenAgency-Social-Webhooks/1' })
   })
 
   it('fails other answers with a clipped reason, and never follows a redirect', async () => {
