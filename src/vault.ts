@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { and, eq } from 'drizzle-orm'
+import { and, asc, eq, gt } from 'drizzle-orm'
 import { z } from 'zod'
 import { clock, recordEvent, type EngineContext } from './context.js'
-import { sealSecret } from './crypto/sealed.js'
-import type { Executor } from './db/client.js'
+import { openSealedSecret, runnerPublicKeyFor, sealSecret } from './crypto/sealed.js'
+import type { Database, Executor } from './db/client.js'
 import { browserAccounts, browserPlatforms, channels } from './db/schema.js'
 import { EngineError, notFound } from './errors.js'
 import { browserChannelKind } from './platforms/browser/rules.js'
@@ -108,4 +108,62 @@ export async function linkBrowserChannel(executor: Executor, organizationId: str
   if (channel) await recordEvent(executor, { organizationId, kind: 'channel.connected', channelId: channel.id, detail: { browserAccountId: account.id } })
   const [existing] = await executor.select({ id: channels.id }).from(channels).where(eq(channels.browserAccountId, account.id)).limit(1)
   return { channelId: existing!.id, created: Boolean(channel) }
+}
+
+export interface ResealResult {
+  /** Rows read. */
+  checked: number
+  /** Already sealed under the current label. */
+  current: number
+  /** Sealed under the legacy label: re-sealed, or in a dry run, would be. */
+  resealed: number
+  /** Opened under neither label (another runner key, or damaged): left as they are. */
+  unopenable: string[]
+}
+
+/**
+ * Re-seals every browser login still under the legacy HKDF label with the
+ * current one, `batchSize` rows per transaction. Each batch is locked while
+ * it is read and written, so a concurrent `vault put` is never overwritten.
+ * The plaintext, status and `updated_at` stay the same; each re-sealed row
+ * records `browser_account.resealed`. Idempotent: a second run finds every
+ * row current. Needs the runner's private key, which the engine never holds.
+ */
+export async function resealBrowserAccounts(db: Database, runnerPrivateKey: string, options: { dryRun?: boolean, batchSize?: number, onBatch?: (progress: ResealResult) => void } = {}): Promise<ResealResult> {
+  const runnerPublicKey = runnerPublicKeyFor(runnerPrivateKey)
+  const batchSize = options.batchSize ?? 50
+  const result: ResealResult = { checked: 0, current: 0, resealed: 0, unopenable: [] }
+  let after = ''
+  for (;;) {
+    const count = await db.transaction(async (transaction) => {
+      const query = transaction.select({ id: browserAccounts.id, organizationId: browserAccounts.organizationId, ephemeralPublicKey: browserAccounts.ephemeralPublicKey,
+        nonce: browserAccounts.nonce, ciphertext: browserAccounts.ciphertext }).from(browserAccounts)
+        .where(after ? gt(browserAccounts.id, after) : undefined).orderBy(asc(browserAccounts.id)).limit(batchSize)
+      const rows = options.dryRun ? await query : await query.for('update')
+      for (const row of rows) {
+        result.checked++
+        let opened: ReturnType<typeof openSealedSecret>
+        try {
+          opened = openSealedSecret(runnerPrivateKey, row.id, row)
+        } catch {
+          result.unopenable.push(row.id)
+          continue
+        }
+        if (opened.label === 'current') {
+          result.current++
+          continue
+        }
+        result.resealed++
+        if (options.dryRun) continue
+        const sealed = sealSecret(runnerPublicKey, row.id, opened.plaintext)
+        await transaction.update(browserAccounts).set({ ephemeralPublicKey: sealed.ephemeralPublicKey, nonce: sealed.nonce, ciphertext: sealed.ciphertext })
+          .where(eq(browserAccounts.id, row.id))
+        await recordEvent(transaction, { organizationId: row.organizationId, kind: 'browser_account.resealed', detail: { browserAccountId: row.id } })
+      }
+      if (rows.length > 0) after = rows.at(-1)!.id
+      return rows.length
+    })
+    if (count > 0) options.onBatch?.({ ...result, unopenable: [...result.unopenable] })
+    if (count < batchSize) return result
+  }
 }
