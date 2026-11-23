@@ -165,7 +165,7 @@ export interface PublicMedia {
 }
 
 export function publicMediaKey(serviceToken: string) {
-  return Buffer.from(hkdfSync('sha256', serviceToken, '', 'leonessa-social-engine media-url v1', 32))
+  return Buffer.from(hkdfSync('sha256', serviceToken, '', 'openagency-social media-url v1', 32))
 }
 
 export function mediaSignature(key: Buffer, organizationId: string, mediaId: string, expires: number) {

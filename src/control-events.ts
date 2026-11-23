@@ -9,7 +9,7 @@ import { errorFields, log } from './log.js'
 // organization, pull now". They carry no content; the control plane pulls
 // over the authenticated routes, and its scheduled pull stays the backstop.
 
-export const controlEventsSalt = 'comune-engine-events-v1'
+export const controlEventsSalt = 'openagency-engine-events-v1'
 export const controlEventsInfo = 'social'
 /** Tries after the first one fails: then the event is dropped and the scheduled pull covers it. */
 export const controlEventRetryDelaysMs = [1_000, 5_000, 30_000, 120_000, 600_000]
@@ -18,12 +18,12 @@ export const controlEventTimeoutMs = 5_000
 const claimLeaseMs = 30_000
 const batchSize = 20
 
-/** HKDF-SHA256 of the service token, salt `comune-engine-events-v1`, info `social`, 32 bytes. Both sides derive it; nothing new to configure. */
+/** HKDF-SHA256 of the service token, salt `openagency-engine-events-v1`, info `social`, 32 bytes. Both sides derive it; nothing new to configure. */
 export function controlEventKey(serviceToken: string) {
   return Buffer.from(hkdfSync('sha256', serviceToken, controlEventsSalt, controlEventsInfo, 32))
 }
 
-/** Hex HMAC-SHA256 of `<timestamp>.<raw body>`; sent as `x-comune-signature: v1=<hex>`. */
+/** Hex HMAC-SHA256 of `<timestamp>.<raw body>`; sent as `x-openagency-signature: v1=<hex>`. */
 export function signControlEvent(key: Buffer, timestamp: number, body: string) {
   return createHmac('sha256', key).update(`${timestamp}.${body}`).digest('hex')
 }
@@ -80,8 +80,8 @@ type Row = typeof controlEvents.$inferSelect
 export function controlEventRequest(url: string, key: Buffer, event: { id: string, type: string, organizationId: string | null }, now: Date): ControlEventRequest {
   const body = JSON.stringify({ id: event.id, type: event.type, at: now.toISOString(), organizationId: event.organizationId, data: {} })
   const timestamp = Math.floor(now.getTime() / 1000)
-  return { url, body, headers: { 'content-type': 'application/json', 'x-comune-event-id': event.id, 'x-comune-timestamp': String(timestamp),
-    'x-comune-signature': `v1=${signControlEvent(key, timestamp, body)}` } }
+  return { url, body, headers: { 'content-type': 'application/json', 'x-openagency-event-id': event.id, 'x-openagency-timestamp': String(timestamp),
+    'x-openagency-signature': `v1=${signControlEvent(key, timestamp, body)}` } }
 }
 
 /**

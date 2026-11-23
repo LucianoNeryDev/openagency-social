@@ -425,8 +425,8 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
     expect(await db.select().from(controlEvents)).toEqual([])
     const request = requests.find(value => JSON.parse(value.body).type === 'drafts.available')!
     const body = JSON.parse(request.body) as { id: string, type: string, at: string, organizationId: string, data: object }
-    expect(body).toEqual({ id: request.headers['x-comune-event-id'], type: 'drafts.available', at: now.toISOString(), organizationId: org, data: {} })
-    expect(request.headers['x-comune-signature']).toBe(`v1=${signControlEvent(controlEventKey(serviceToken), Number(request.headers['x-comune-timestamp']), request.body)}`)
+    expect(body).toEqual({ id: request.headers['x-openagency-event-id'], type: 'drafts.available', at: now.toISOString(), organizationId: org, data: {} })
+    expect(request.headers['x-openagency-signature']).toBe(`v1=${signControlEvent(controlEventKey(serviceToken), Number(request.headers['x-openagency-timestamp']), request.body)}`)
 
     // A change that joins while the event is on its way is sent again, as a new event.
     const joining = { ...target, send: async (value: ControlEventRequest) => {
@@ -438,7 +438,7 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
     await deliverControlEvents(context, joining)
     const [again] = await db.select().from(controlEvents)
     expect(again).toMatchObject({ type: 'replies.changed', attemptCount: 0, generation: 2 })
-    expect(again!.eventId).not.toBe(requests.at(-1)!.headers['x-comune-event-id'])
+    expect(again!.eventId).not.toBe(requests.at(-1)!.headers['x-openagency-event-id'])
 
     // Failures wait 1 s, 5 s, 30 s, 2 min and 10 min, then the event is dropped.
     answer = false

@@ -20,6 +20,14 @@
   exists but the new one does not, the runner keeps using the old directory and
   logs it once, so an existing runner keeps its data. The old directory
   fallback and the old variable name are dropped in wave 3c.
+- Rename wave 3b, senders switch to the new names. Events to the control plane
+  are sent with `x-openagency-event-id`, `x-openagency-timestamp` and
+  `x-openagency-signature`, signed with the key derived from the salt
+  `openagency-engine-events-v1` (info `social` and the `v1=<hex>` HMAC format
+  are unchanged), and media URLs are signed with the HKDF info
+  `openagency-social media-url v1`. Merge only after the control plane (Portal)
+  accepts these names in production: it refuses them until then. The pinned
+  test vectors (events key and signature, media signature) were recomputed.
 - Renamed the remaining Banditore names: repository links
   (`github.com/LucianoNeryDev/openagency-social`), the `package.json`
   `repository` URL, the brand files (`docs/brand/social-*`) and the database

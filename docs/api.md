@@ -32,7 +32,9 @@ With `PUBLIC_MEDIA_URL` set, the worker gives URL-based platforms
 `<PUBLIC_MEDIA_URL>/<org>/<mediaId>?expires=<unix seconds>&signature=<sig>`,
 valid for one hour. `sig` is base64url HMAC-SHA256 over
 `<org>\n<mediaId>\n<expires>`, keyed with
-`HKDF-SHA256(service token, salt "", info "leonessa-social-engine media-url v1", 32 bytes)`.
+`HKDF-SHA256(service token, salt "", info "openagency-social media-url v1", 32 bytes)`.
+The control plane accepted URLs signed with the former info
+`leonessa-social-engine media-url v1` until wave 3c; they are no longer made.
 The dashboard verifies the signature and expiry, then reads the bytes with the
 route above.
 
@@ -585,26 +587,26 @@ allowed: the operator sets it).
 Each is a `POST` with a JSON body and these headers:
 
 ```text
-body                 {"id": "<uuid>", "type": "<type>", "at": "<ISO-8601>", "organizationId": "<org>", "data": {}}
-x-comune-event-id    <the body's id>
-x-comune-timestamp   <unix seconds>
-x-comune-signature   v1=<hex HMAC-SHA256(key, "<timestamp>.<raw body>")>
-key                  HKDF-SHA256(ikm = SERVICE_TOKEN, salt = "comune-engine-events-v1", info = "social", 32 bytes)
+body                     {"id": "<uuid>", "type": "<type>", "at": "<ISO-8601>", "organizationId": "<org>", "data": {}}
+x-openagency-event-id    <the body's id>
+x-openagency-timestamp   <unix seconds>
+x-openagency-signature   v1=<hex HMAC-SHA256(key, "<timestamp>.<raw body>")>
+key                      HKDF-SHA256(ikm = SERVICE_TOKEN, salt = "openagency-engine-events-v1", info = "social", 32 bytes)
 ```
 
 Both sides derive the key from the service token; there is nothing new to
-configure. The `x-comune-*` header names and the `comune-engine-events-v1` salt
-keep the suite's former name, Comune (now OpenAgency), because the receiver
-verifies exactly these values; renaming them would break the signature. A receiver checks the signature over the raw body in constant
+configure. Until wave 3c the control plane also accepted the former
+`x-comune-*` headers signed with the salt `comune-engine-events-v1`; the engine
+no longer sends them, and the two sets are never mixed. A receiver checks the signature over the raw body in constant
 time, refuses a timestamp more than 300 s off, and answers `2xx` quickly.
 Test vector (`signControlEvent` in `src/control-events.ts`):
 
 ```text
 SERVICE_TOKEN  example-service-token-0123456789abcdef
-key            0138797f9bedc5a05c0c33a151d397d505326dbedef60b56f50305b92c949817
+key            9199ae10e1303b035c77807c393f98b4ed12756200d5db2f0ac3ffadc38627e7
 timestamp      1800000000
 body           {"id":"6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7","type":"drafts.available","at":"2027-01-15T08:00:00.000Z","organizationId":"org-example","data":{}}
-signature      51a877ba5b22068c1f7e7fecac6261ad5195349fc588fce7754b91c409468817
+signature      70727695c19e9be5060707ddf6780223f51a4e1f9e81ea32541b0b3331ec56c5
 ```
 
 Events are queued in the transaction that made the change and sent after it

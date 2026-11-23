@@ -48,7 +48,7 @@ describe('public media URLs', () => {
   // The dashboard's verifyMediaSignature test checks the same vector.
   it('matches the vector shared with the dashboard', () => {
     expect(mediaSignature(publicMediaKey('fixture-engine-service-token-0123456789'), 'org-a', 'c3d4e5f6-0000-4000-8000-000000000000', 1_900_000_000))
-      .toBe('DqghHc496UV28pDgjAW9UUZSCuHAXUrENj09qgsvauk')
+      .toBe('7NtnaE1tLncj354NZaDY9Ckc5RNIOXYzZMsVYM78iG4')
   })
 
   it('derives a key distinct from the service token', () => {
