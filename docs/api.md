@@ -743,6 +743,11 @@ browser runner with a logged-in profile. Their logins are sealed to the runner's
 public key with `pnpm vault put`; the engine stores them but cannot open them,
 and no route returns them.
 
+A login's key is derived (HKDF-SHA256) from an X25519 exchange under the label
+`openagency-social-vault v1:<account>`. The runner also opens logins sealed
+before the rename under `leonessa-vault v1:<account>`; `vault reseal` moves
+stored logins to the current label ([docs/deploy.md](deploy.md)).
+
 | Route | Purpose |
 | --- | --- |
 | `GET /v1/tenants/:org/browser-accounts` | `{accounts: [{id, platform, handle, status, updatedAt}]}`. |

@@ -142,3 +142,33 @@ pnpm vault link --org <organization> --account <account id> [--page <company id>
 
 `login.json` is `{"username", "password", "totp"?}`. The login itself starts
 from the API ([docs/api.md](api.md), browser accounts).
+
+### Re-sealing logins after the vault label rename
+
+The key that seals a login is derived with HKDF-SHA256 under the info label
+`openagency-social-vault v1:<account>`. Logins stored before that were sealed
+under `leonessa-vault v1:<account>`. The label is not stored with a login, so
+the runner tries the current label first and then the old one, and the GCM
+tag decides; nothing else about the stored login changes. `vault reseal` moves
+stored logins onto the current label:
+
+```sh
+RUNNER_PRIVATE_KEY=… node dist/cli/vault.js reseal --dry-run   # counts only
+RUNNER_PRIVATE_KEY=… node dist/cli/vault.js reseal             # re-seal, 50 rows per transaction
+```
+
+- Order: release the runner first (an older runner cannot open logins sealed
+  under the new label, including new ones from `vault put`), then the engine.
+  Run `reseal` once this version is settled in that environment, on staging
+  first and production after; after it, rolling the runner back to an older
+  version breaks every browser login.
+- It needs the runner's private key and `DATABASE_URL` (the runtime role is
+  enough). Pass the key for this one command only; it never belongs in the
+  engine's environment. The command prints counts and account IDs, never
+  logins.
+- It locks each batch while re-sealing it, keeps each login's plaintext,
+  status and `updated_at`, and records `browser_account.resealed` per account.
+  Running it again changes nothing.
+- A login that opens under neither label (sealed to another runner key, or
+  damaged) is reported as unopenable, left as it is, and makes the command
+  exit 1. Store it again with `vault put`.

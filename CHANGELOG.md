@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The browser vault's HKDF info label is now `openagency-social-vault
+  v1:<account>` (was `leonessa-vault v1:<account>`). Logins are always sealed
+  under the new label; the runner opens either, trying the new one first, and
+  fails as before when neither authenticates. The stored format and the
+  associated data are unchanged. New `vault reseal [--dry-run] [--batch-size
+  n]` re-seals stored logins still under the old label, in small
+  transactions, and is idempotent; run it once this version is deployed,
+  staging first ([docs/deploy.md](docs/deploy.md)). Release the runner before
+  the engine: an older runner cannot open logins sealed under the new label.
 - Rename wave 3a, names read by other systems (the receiving side accepts both
   names; nothing the engine sends changes): the CI database variable is now
   `SOCIAL_TEST_POSTGRES_URL` (workflow, README and CONTRIBUTING; the test
