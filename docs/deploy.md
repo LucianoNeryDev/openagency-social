@@ -24,7 +24,7 @@ owner: the first migration refuses an elevated runtime role.
 ## Engine
 
 ```sh
-docker build --build-arg VCS_REF=$(git rev-parse HEAD) -t banditore .
+docker build --build-arg VCS_REF=$(git rev-parse HEAD) -t openagency-social .
 ```
 
 Configuration comes from the environment; [.env.example](../.env.example)
@@ -110,7 +110,7 @@ provider app must be able to hold that kind of channel and serve that tenant.
 ## Browser runner
 
 ```sh
-docker build -f deploy/runner/Dockerfile --build-arg VCS_REF=$(git rev-parse HEAD) -t banditore-runner .
+docker build -f deploy/runner/Dockerfile --build-arg VCS_REF=$(git rev-parse HEAD) -t openagency-social-runner .
 pnpm vault keygen --out runner-key.json   # new key pair, written mode 600
 ```
 

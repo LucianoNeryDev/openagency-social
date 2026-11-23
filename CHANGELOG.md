@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Renamed the project from Banditore to OpenAgency Social, the social engine of
+  OpenAgency (formerly Comune); the control plane, Palazzo, is now OpenAgency
+  Portal. Only names in prose, image labels and the npm package name
+  (`openagency-social`) changed. Webhook payloads and event types, the
+  `Banditore-Webhooks/1` user agent, the `x-comune-*` event headers and the
+  signing key derivation, environment variables, database names and job types
+  are unchanged.
 - Renamed the project to Banditore. Webhooks now send the user agent
   `Banditore-Webhooks/1`.
 - AI answers: per-tenant answering settings (`PUT /v1/tenants/:org/answering`);

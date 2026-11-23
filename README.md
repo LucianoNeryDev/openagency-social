@@ -1,14 +1,12 @@
 <img src="docs/brand/banditore-icon.svg" alt="" width="96" height="96">
 
-# Banditore
+# OpenAgency Social
 
-*Banditore* is Italian for town crier: the person who walked into the piazza
-and announced the news to everyone at once.
-
-Banditore is a self-hosted service that publishes and manages social media for many
-clients at once. It posts, reads statistics and comments, sends approved
+OpenAgency Social is the social engine of OpenAgency, a self-hosted suite for
+running a digital agency. It publishes and manages social media for many
+clients at once: it posts, reads statistics and comments, sends approved
 replies and direct messages, and tells your applications what happened through
-signed webhooks.
+signed webhooks. It was called Banditore until 2026-11-23.
 
 The engine is the execution layer only. A control plane (your dashboard or
 app) owns tenants, drafts, approval and audit, and sends the engine approved
