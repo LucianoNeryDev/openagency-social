@@ -6,20 +6,42 @@ platforms driven through a website.
 
 ## Database
 
-The migrations grant tables to roles that are paired with the database name,
-so use one of these combinations (later migrations grant their new tables to
-the roles that already hold the earlier ones):
+Create the database and its roles yourself, then name the roles to the
+migrations with three database settings. The migrations grant every table to
+the roles these settings name, and name no database or role themselves, so any
+names work. The suite's own installs use these:
 
-| Database | Runtime role | Backup role |
-| --- | --- | --- |
-| `leonessa_social_engine` | `social_engine_runtime` | — |
-| `leonessa_social_engine_staging` | `social_engine_runtime_staging` | `social_engine_backup_staging` |
-| `leonessa_social_engine_production` | `social_engine_runtime_production` | `social_engine_backup_production` |
+| Database | Migrator role | Runtime role | Backup role |
+| --- | --- | --- | --- |
+| `openagency_social` (local) | `social_migrator` | `social_runtime` | — |
+| `openagency_social_<env>` | `social_migrator_<env>` | `social_runtime_<env>` | `social_backup_<env>` |
 
-Create the roles yourself. A separate migrator role owns the database and is
-used only by `pnpm db:migrate` (`node dist/cli/migrate.js` in the container)
-with `DATABASE_MIGRATION_URL`. The runtime role must not be a superuser or
-owner: the first migration refuses an elevated runtime role.
+As a superuser, once per database and before the first migration:
+
+```sql
+CREATE ROLE social_migrator LOGIN PASSWORD '…';
+CREATE ROLE social_runtime LOGIN PASSWORD '…' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+CREATE DATABASE openagency_social OWNER social_migrator;
+REVOKE ALL ON DATABASE openagency_social FROM PUBLIC;
+GRANT CONNECT ON DATABASE openagency_social TO social_migrator, social_runtime;
+ALTER DATABASE openagency_social SET openagency.migrator_role = 'social_migrator';
+ALTER DATABASE openagency_social SET openagency.runtime_role = 'social_runtime';
+-- Optional: a read-only role for backups, created like the runtime role.
+ALTER DATABASE openagency_social SET openagency.backup_role = 'social_backup';
+```
+
+| Setting | Meaning |
+| --- | --- |
+| `openagency.migrator_role` | The role `pnpm db:migrate` connects as; the migrations refuse to run as any other |
+| `openagency.runtime_role` | The role `DATABASE_URL` connects as: read and write on every table, append-only on `events` |
+| `openagency.backup_role` | Optional: read-only on every table and sequence |
+
+A migration fails with the setting's name when a required setting is unset,
+when a role it names does not exist, or when the runtime role is the migrator,
+a superuser or otherwise elevated. Settings reach new sessions only, so set
+them before migrating. The migrator role owns the database and is used only by
+`pnpm db:migrate` (`node dist/cli/migrate.js` in the container) with
+`DATABASE_MIGRATION_URL`.
 
 ## Engine
 
@@ -124,7 +146,7 @@ checks).
 | `RUNNER_TOKEN` | At least 32 characters; the engine's `RUNNER_TOKEN` |
 | `RUNNER_PRIVATE_KEY` | From `vault keygen`; opens the sealed logins |
 | `RUNNER_VNC_PASSWORD` | Required; VNC on loopback `RUNNER_VNC_PORT` (5930), noVNC on `RUNNER_NOVNC_PORT` (6080) |
-| `RUNNER_DATA_DIR` | Persistent volume for browser profiles and `actions.json`; default `/var/lib/openagency-social-runner`. While unset, a runner whose old default `/var/lib/leonessa-browser-runner` exists and the new one does not keeps using the old directory (logged once at start); that fallback is dropped in wave 3c |
+| `RUNNER_DATA_DIR` | Persistent volume for browser profiles and `actions.json`; default `/var/lib/openagency-social-runner` |
 | `RUNNER_NTFY_URL` | Optional ntfy topic told when an account needs a person |
 | `RUNNER_DISPLAY` | X display, default `:47`; with host networking it must not collide with a host display |
 

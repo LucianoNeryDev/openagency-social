@@ -277,9 +277,9 @@ describe('control plane events', () => {
   // The same vector is checked by the control plane's verifier.
   it('signs with the pinned vector', () => {
     const key = controlEventKey('example-service-token-0123456789abcdef')
-    expect(key.toString('hex')).toBe('0138797f9bedc5a05c0c33a151d397d505326dbedef60b56f50305b92c949817')
+    expect(key.toString('hex')).toBe('9199ae10e1303b035c77807c393f98b4ed12756200d5db2f0ac3ffadc38627e7')
     const body = '{"id":"6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7","type":"drafts.available","at":"2027-01-15T08:00:00.000Z","organizationId":"org-example","data":{}}'
-    expect(signControlEvent(key, 1_800_000_000, body)).toBe('51a877ba5b22068c1f7e7fecac6261ad5195349fc588fce7754b91c409468817')
+    expect(signControlEvent(key, 1_800_000_000, body)).toBe('70727695c19e9be5060707ddf6780223f51a4e1f9e81ea32541b0b3331ec56c5')
   })
 
   it('builds the request the spec describes', () => {
@@ -287,9 +287,9 @@ describe('control plane events', () => {
     const request = controlEventRequest('https://dashboard.example/api/engines/social/events', key,
       { id: '6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7', type: 'drafts.available', organizationId: 'org-example' }, new Date('2027-01-15T08:00:00.000Z'))
     expect(request.body).toBe('{"id":"6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7","type":"drafts.available","at":"2027-01-15T08:00:00.000Z","organizationId":"org-example","data":{}}')
-    expect(request.headers).toEqual({ 'content-type': 'application/json', 'x-comune-event-id': '6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7',
-      'x-comune-timestamp': String(Date.parse('2027-01-15T08:00:00.000Z') / 1000),
-      'x-comune-signature': `v1=${signControlEvent(key, Date.parse('2027-01-15T08:00:00.000Z') / 1000, request.body)}` })
+    expect(request.headers).toEqual({ 'content-type': 'application/json', 'x-openagency-event-id': '6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7',
+      'x-openagency-timestamp': String(Date.parse('2027-01-15T08:00:00.000Z') / 1000),
+      'x-openagency-signature': `v1=${signControlEvent(key, Date.parse('2027-01-15T08:00:00.000Z') / 1000, request.body)}` })
   })
 
   it('takes https anywhere and http on loopback only', () => {

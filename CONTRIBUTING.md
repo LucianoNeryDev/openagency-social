@@ -36,8 +36,11 @@ Changes must keep these true:
   Do not introduce pg-boss, Temporal, Redis or another broker.
 - Migrations live in `drizzle/` and are numbered and forward-only. Never edit
   one once it has been released; fix it with a new migration. A migration that
-  adds a table also grants it to the runtime role, as
-  `0001_runtime_grants.sql` does.
+  adds a table also grants it to the roles named by the database settings
+  `openagency.runtime_role` and `openagency.backup_role`, with the same checks
+  as `0001_runtime_grants.sql`. Migrations never name a database or a role
+  ([docs/deploy.md](docs/deploy.md#database)); `tests/migrations.test.ts`
+  checks it.
 - Code, identifiers and operator output are in English.
 
 ## Before you open a pull request
@@ -62,9 +65,10 @@ SOCIAL_TEST_POSTGRES_URL=postgres://postgres:secret@127.0.0.1:5432/postgres \
   pnpm test:db --no-file-parallelism
 ```
 
-The suites create and drop the `leonessa_social_engine` database and the
-`social_engine_migrator` and `social_engine_runtime` roles on that server, so do
-not point them at one that holds data you care about.
+The suites create and drop the `openagency_social` and
+`openagency_social_settings` databases and the `social_migrator`,
+`social_runtime` and `social_backup` roles on that server, so do not point them
+at one that holds data you care about.
 
 Continuous integration runs the same checks, the integration suites against a
 PostgreSQL service and a secret scan. Add or update tests with your change, and

@@ -11,20 +11,23 @@ const command = promisify(execFile)
 // Same pinned PostgreSQL 17 image as the control plane's database tests.
 const image = 'postgres:17@sha256:aa90e97ee862e558111d34cfb8b2c4bec768c2b039fb791341686928560263b3'
 const label = 'social-test=postgres'
-// Label of the fixture before the rename to OpenAgency Social; cleanup still removes containers that carry it.
-const legacyLabel = 'banditore-test=postgres'
 
-const roles = ['social_engine_migrator', 'social_engine_runtime']
-const databaseName = 'leonessa_social_engine'
+export const migratorRole = 'social_migrator'
+export const runtimeRole = 'social_runtime'
+export const backupRole = 'social_backup'
+const roles = [migratorRole, runtimeRole, backupRole]
+const databaseName = 'openagency_social'
+export const migrationsFolder = fileURLToPath(new URL('../../drizzle', import.meta.url))
 
 /**
- * A PostgreSQL 17 database with migrator and runtime roles. By default it is a disposable
- * container. When SOCIAL_TEST_POSTGRES_URL (or the deprecated BANDITORE_TEST_POSTGRES_URL) names a PostgreSQL server (a superuser URL, as a CI
- * service container provides), that server is used instead and the database and roles are dropped
- * again afterwards; migrations fix their names, so run the suites one at a time against it.
+ * A PostgreSQL 17 database with migrator, runtime and backup roles, named to the migrations through
+ * the openagency.*_role database settings as an operator would (docs/deploy.md). By default it is a
+ * disposable container. When SOCIAL_TEST_POSTGRES_URL names a PostgreSQL server (a superuser URL, as
+ * a CI service container provides), that server is used instead and the database and roles are
+ * dropped again afterwards; their names are fixed, so run the suites one at a time against it.
  */
 export async function postgresFixture() {
-  const externalUrl = process.env.SOCIAL_TEST_POSTGRES_URL || process.env.BANDITORE_TEST_POSTGRES_URL
+  const externalUrl = process.env.SOCIAL_TEST_POSTGRES_URL
   const external = externalUrl ? new URL(externalUrl) : undefined
   const password = randomBytes(24).toString('hex')
   const pools: pg.Pool[] = []
@@ -41,15 +44,11 @@ export async function postgresFixture() {
   let adminPool: pg.Pool | undefined
   async function dropExternal() {
     if (!adminPool) return
-    await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`)
+    // Every database the migrator owns: this one and any a suite made beside it.
+    const owned = await adminPool.query<{ name: string }>(
+      'SELECT d.datname AS name FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE r.rolname = $1', [migratorRole])
+    for (const { name } of owned.rows) await adminPool.query(`DROP DATABASE IF EXISTS ${pg.escapeIdentifier(name)} WITH (FORCE)`)
     for (const role of roles) await adminPool.query(`DROP ROLE IF EXISTS ${role}`)
-  }
-  // Containers left behind by runs from before the label was renamed would otherwise stay on a runner for good.
-  async function removeLegacyContainers() {
-    try {
-      const orphans = (await command('docker', ['ps', '-aq', '--filter', `label=${legacyLabel}`])).stdout.split('\n').filter(Boolean)
-      if (orphans.length > 0) await command('docker', ['rm', '-fv', ...orphans])
-    } catch { /* best effort: a failed sweep must not fail the suite */ }
   }
   async function cleanup() {
     await Promise.all(pools.filter(value => value !== adminPool).map(value => value.end().catch(() => undefined)))
@@ -63,7 +62,6 @@ export async function postgresFixture() {
     const inspection = JSON.parse((await command('docker', ['inspect', id])).stdout)[0]
     if (inspection.Config.Labels['social-test'] !== 'postgres') throw new Error('Fixture ownership mismatch')
     await command('docker', ['rm', '-fv', id])
-    await removeLegacyContainers()
   }
   try {
     if (!external) {
@@ -85,15 +83,26 @@ export async function postgresFixture() {
     for (const role of roles) {
       await admin.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`)
     }
-    await admin.query(`CREATE DATABASE ${databaseName} OWNER social_engine_migrator`)
-    await admin.query(`REVOKE ALL ON DATABASE ${databaseName} FROM PUBLIC`)
-    await admin.query(`GRANT CONNECT ON DATABASE ${databaseName} TO social_engine_migrator, social_engine_runtime`)
-    const migrator = pool('social_engine_migrator', databaseName)
-    await migrate(drizzle(migrator), { migrationsFolder: fileURLToPath(new URL('../../drizzle', import.meta.url)) })
-    const runtime = pool('social_engine_runtime', databaseName)
-    return { cleanup, migrator, runtime, db: drizzle(runtime, { schema }), pool }
+    await createDatabase(admin, databaseName, { migrator: migratorRole, runtime: runtimeRole, backup: backupRole })
+    const migrator = pool(migratorRole, databaseName)
+    await migrate(drizzle(migrator), { migrationsFolder })
+    const runtime = pool(runtimeRole, databaseName)
+    return { cleanup, admin, migrator, runtime, db: drizzle(runtime, { schema }), pool }
   } catch (error) {
     await cleanup().catch(() => undefined)
     throw error
+  }
+}
+
+/**
+ * Creates a database owned by the migrator, open only to the migrator and runtime roles, with the
+ * openagency.*_role settings the migrations read. A setting left out is not set.
+ */
+export async function createDatabase(admin: pg.Pool, name: string, settings: { migrator?: string, runtime?: string, backup?: string }) {
+  await admin.query(`CREATE DATABASE ${pg.escapeIdentifier(name)} OWNER ${pg.escapeIdentifier(migratorRole)}`)
+  await admin.query(`REVOKE ALL ON DATABASE ${pg.escapeIdentifier(name)} FROM PUBLIC`)
+  await admin.query(`GRANT CONNECT ON DATABASE ${pg.escapeIdentifier(name)} TO ${pg.escapeIdentifier(migratorRole)}, ${pg.escapeIdentifier(runtimeRole)}`)
+  for (const [key, role] of Object.entries(settings)) {
+    if (role !== undefined) await admin.query(`ALTER DATABASE ${pg.escapeIdentifier(name)} SET openagency.${key}_role = ${pg.escapeLiteral(role)}`)
   }
 }

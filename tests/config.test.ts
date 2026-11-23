@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { loadConfig } from '../src/config.js'
 
 const base = {
-  DATABASE_URL: 'postgresql://runtime:pw@127.0.0.1:5432/leonessa_social_engine',
+  DATABASE_URL: 'postgresql://runtime:pw@127.0.0.1:5432/openagency_social',
   SERVICE_TOKEN: 's'.repeat(40),
   TOKEN_KEYS: JSON.stringify({ k1: randomBytes(32).toString('base64') }),
   TOKEN_KEY_ACTIVE: 'k1',

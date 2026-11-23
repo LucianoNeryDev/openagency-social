@@ -6,7 +6,8 @@ import {
  * Secrets sealed to the browser runner: anyone with its public key can seal,
  * only the runner's private key opens. Ephemeral X25519, HKDF-SHA256 and
  * AES-256-GCM; the account ID is bound into the key and the associated data,
- * so a blob copied onto another account fails to open.
+ * so a blob copied onto another account fails to open. The HKDF info label
+ * is `openagency-social-vault v1:<account>`.
  */
 export interface SealedSecret {
   ephemeralPublicKey: Buffer
@@ -15,6 +16,7 @@ export interface SealedSecret {
 }
 
 const tagLength = 16
+const label = 'openagency-social-vault v1'
 
 /** A new runner key pair: the public key as base64url raw X25519, the private key as base64 PKCS#8. */
 export function runnerKeyPair() {
@@ -38,11 +40,17 @@ export function openSecret(runnerPrivateKey: string, accountId: string, sealed: 
   if (sealed.ephemeralPublicKey.length !== 32 || sealed.nonce.length !== 12 || sealed.ciphertext.length <= tagLength) throw new Error('Malformed sealed secret')
   const privateKey = createPrivateKey({ key: Buffer.from(runnerPrivateKey, 'base64'), format: 'der', type: 'pkcs8' })
   const ephemeral = publicKeyObject(sealed.ephemeralPublicKey.toString('base64url'))
-  const key = deriveKey(diffieHellman({ privateKey, publicKey: ephemeral }), sealed.ephemeralPublicKey, rawPublicKey(createPublicKey(privateKey)), accountId)
+  const shared = diffieHellman({ privateKey, publicKey: ephemeral })
+  const key = deriveKey(shared, sealed.ephemeralPublicKey, rawPublicKey(createPublicKey(privateKey)), accountId)
   const decipher = createDecipheriv('aes-256-gcm', key, sealed.nonce, { authTagLength: tagLength })
   decipher.setAAD(Buffer.from(`account:${accountId}`))
   decipher.setAuthTag(sealed.ciphertext.subarray(-tagLength))
   return Buffer.concat([decipher.update(sealed.ciphertext.subarray(0, -tagLength)), decipher.final()]).toString('utf8')
+}
+
+/** The base64url public key that goes with a base64 PKCS#8 runner private key. */
+export function runnerPublicKeyFor(runnerPrivateKey: string) {
+  return rawPublicKey(createPublicKey(createPrivateKey({ key: Buffer.from(runnerPrivateKey, 'base64'), format: 'der', type: 'pkcs8' })))
 }
 
 export function isRunnerPublicKey(value: string) {
@@ -55,7 +63,7 @@ export function isRunnerPublicKey(value: string) {
 
 function deriveKey(shared: Buffer, ephemeralPublicKey: Buffer, runnerPublicKey: string, accountId: string) {
   const salt = Buffer.concat([ephemeralPublicKey, Buffer.from(runnerPublicKey, 'base64url')])
-  return Buffer.from(hkdfSync('sha256', shared, salt, `leonessa-vault v1:${accountId}`, 32))
+  return Buffer.from(hkdfSync('sha256', shared, salt, `${label}:${accountId}`, 32))
 }
 
 function publicKeyObject(raw: string) {

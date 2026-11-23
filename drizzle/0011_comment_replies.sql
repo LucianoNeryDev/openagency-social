@@ -64,22 +64,35 @@ CREATE INDEX "replies_job" ON "replies" USING btree ("job_id");--> statement-bre
 -- (from_channel null, so no reply is offered under them): every post still being
 -- read is read again on the collectors' next passes, which fills it in.
 UPDATE "response_checks" SET "next_check_at" = now() WHERE "state" IN ('ok', 'pending') AND "next_check_at" > now();--> statement-breakpoint
--- Same role resolution as 0001_runtime_grants.sql.
+-- Same role checks as 0001_runtime_grants.sql: the roles come from the
+-- openagency.*_role database settings.
 DO $$
 DECLARE
-  runtime_role text;
-  backup_role text;
+  migrator_role text := nullif(current_setting('openagency.migrator_role', true), '');
+  runtime_role text := nullif(current_setting('openagency.runtime_role', true), '');
+  backup_role text := nullif(current_setting('openagency.backup_role', true), '');
   target text;
 BEGIN
-  CASE current_database()
-    WHEN 'leonessa_social_engine' THEN runtime_role := 'social_engine_runtime'; backup_role := NULL;
-    WHEN 'leonessa_social_engine_staging' THEN runtime_role := 'social_engine_runtime_staging'; backup_role := 'social_engine_backup_staging';
-    WHEN 'leonessa_social_engine_production' THEN runtime_role := 'social_engine_runtime_production'; backup_role := 'social_engine_backup_production';
-    ELSE RAISE EXCEPTION 'unexpected database %', current_database();
-  END CASE;
+  IF migrator_role IS NULL THEN
+    RAISE EXCEPTION 'database setting openagency.migrator_role is not set'
+      USING HINT = 'As a superuser: ALTER DATABASE <database> SET openagency.migrator_role = ''<role>''; see docs/deploy.md';
+  END IF;
+  IF current_user::text <> migrator_role THEN
+    RAISE EXCEPTION 'migrations run as % (openagency.migrator_role), not as %', migrator_role, current_user;
+  END IF;
+  IF runtime_role IS NULL THEN
+    RAISE EXCEPTION 'database setting openagency.runtime_role is not set'
+      USING HINT = 'As a superuser: ALTER DATABASE <database> SET openagency.runtime_role = ''<role>''; see docs/deploy.md';
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = runtime_role) THEN
+    RAISE EXCEPTION 'runtime role % (openagency.runtime_role) does not exist', runtime_role;
+  END IF;
+  IF backup_role IS NOT NULL AND NOT EXISTS (SELECT FROM pg_roles WHERE rolname = backup_role) THEN
+    RAISE EXCEPTION 'backup role % (openagency.backup_role) does not exist', backup_role;
+  END IF;
   FOREACH target IN ARRAY ARRAY['replies', 'reply_cancellations'] LOOP
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO %I', target, runtime_role);
-    IF backup_role IS NOT NULL AND EXISTS (SELECT FROM pg_roles WHERE rolname = backup_role) THEN
+    IF backup_role IS NOT NULL THEN
       EXECUTE format('GRANT SELECT ON public.%I TO %I', target, backup_role);
     END IF;
   END LOOP;

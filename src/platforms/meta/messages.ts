@@ -77,11 +77,19 @@ export function attachmentOf(value: z.infer<typeof attachmentSchema>): MessageAt
   return name ? { type, name } : { type }
 }
 
-/** Why Meta refused a read: a permission it names or implies (10, 200-299), or messaging the app cannot use (3). */
+/**
+ * Why Meta refused a read: a permission it names or implies (10, 200-299),
+ * messaging the app cannot use (3), or an account whose messages cannot be
+ * listed at all (100, for example Instagram's "allow access to messages" turned
+ * off). The read's parameters are fixed, so 100 is not a request to fix by retrying.
+ */
 function readRefusal(error: unknown, permission: string) {
   if (!(error instanceof GraphError) || error.failure.kind !== 'http') return null
   const code = error.failure.code ?? 0
   if (code === 10 || code === 3 || (code >= 200 && code <= 299)) return `Reading messages needs the ${permission} permission; connect the channel again to grant it.`
+  if (code === 100) {
+    return `Meta does not list this account's conversations (${error.failure.message}). Check that the account allows access to messages and has the ${permission} permission, then connect the channel again.`
+  }
   return null
 }
 

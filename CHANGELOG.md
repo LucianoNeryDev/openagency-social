@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Rename wave 4, the complete cut of the old names.
+  - Migrations no longer name a database or a role. Every grant goes to the
+    roles named by the database settings `openagency.migrator_role`,
+    `openagency.runtime_role` and the optional `openagency.backup_role`, which
+    the operator sets once per database (`ALTER DATABASE … SET`); a migration
+    fails with the setting's name when one is missing or names a role that
+    does not exist, and refuses to run as any role but the migrator. The
+    historical migrations were edited to match, `0016` included (it copied the
+    grants of `conversations`). Databases that already ran them are unaffected:
+    drizzle applies a migration by its journal timestamp and never re-reads an
+    applied file. The suite's own names are now `openagency_social[_<env>]`
+    with `social_{migrator,runtime,backup}[_<env>]` ([docs/deploy.md](docs/deploy.md#database)).
+  - The browser vault opens only logins sealed under `openagency-social-vault
+    v1:<account>`; the `leonessa-vault v1` fallback and `vault reseal` are
+    gone. Run `vault reseal` with the previous version before deploying this
+    one, or store the logins again with `vault put`.
+  - The runner's data directory defaults to `/var/lib/openagency-social-runner`
+    with no fallback to the old directory.
+  - The database tests read only `SOCIAL_TEST_POSTGRES_URL`, no longer remove
+    containers with the old `banditore-test` label, and create a backup role to
+    check its grants; a new suite checks the settings from a fresh database.
+  - The brand files (`docs/brand/social-*`) carry the OpenAgency Social
+    wordmark.
+- The browser vault's HKDF info label is now `openagency-social-vault
+  v1:<account>` (was `leonessa-vault v1:<account>`). Logins are always sealed
+  under the new label; the runner opens either, trying the new one first, and
+  fails as before when neither authenticates. The stored format and the
+  associated data are unchanged. New `vault reseal [--dry-run] [--batch-size
+  n]` re-seals stored logins still under the old label, in small
+  transactions, and is idempotent; run it once this version is deployed,
+  staging first ([docs/deploy.md](docs/deploy.md)). Release the runner before
+  the engine: an older runner cannot open logins sealed under the new label.
 - Rename wave 3a, names read by other systems (the receiving side accepts both
   names; nothing the engine sends changes): the CI database variable is now
   `SOCIAL_TEST_POSTGRES_URL` (workflow, README and CONTRIBUTING; the test
@@ -11,6 +43,14 @@
   exists but the new one does not, the runner keeps using the old directory and
   logs it once, so an existing runner keeps its data. The old directory
   fallback and the old variable name are dropped in wave 3c.
+- Rename wave 3b, senders switch to the new names. Events to the control plane
+  are sent with `x-openagency-event-id`, `x-openagency-timestamp` and
+  `x-openagency-signature`, signed with the key derived from the salt
+  `openagency-engine-events-v1` (info `social` and the `v1=<hex>` HMAC format
+  are unchanged), and media URLs are signed with the HKDF info
+  `openagency-social media-url v1`. Merge only after the control plane (Portal)
+  accepts these names in production: it refuses them until then. The pinned
+  test vectors (events key and signature, media signature) were recomputed.
 - Renamed the remaining Banditore names: repository links
   (`github.com/LucianoNeryDev/openagency-social`), the `package.json`
   `repository` URL, the brand files (`docs/brand/social-*`) and the database
