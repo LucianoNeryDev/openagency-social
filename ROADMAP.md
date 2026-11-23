@@ -1,10 +1,10 @@
 # Roadmap
 
-Where Banditore is going. Palazzo is the control plane it is normally used
-with; items that need a change there say so. Released changes are in
+Where OpenAgency Social is going. OpenAgency Portal is the control plane it is
+normally used with; items that need a change there say so. Released changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
-Updated 2026-11-15.
+Updated 2026-11-23.
 
 ## Done
 
@@ -21,7 +21,7 @@ Updated 2026-11-15.
 - Statistics: follower, view and reach history per channel, and each post's
   likes, comments, shares, reach, views and saves, refreshed on a schedule and
   more often while someone is looking.
-- Comments on published posts, and replies approved in Palazzo, sent once on
+- Comments on published posts, and replies approved in Portal, sent once on
   Facebook Pages, Instagram and YouTube within per-channel limits.
 - Direct messages on Facebook Pages and Instagram: conversations read, and
   messages sent once within the 24-hour window and per-channel limits.
@@ -30,18 +30,19 @@ Updated 2026-11-15.
   channel status, replies and messages.
 - Postiz replaced (2026-11-02), with an operator import for the channels that
   came from it ([ADR 0001](docs/adr/0001-own-engine-replaces-postiz.md)).
-- First public release, 0.1.0 (2026-11-13), and the rename to Banditore.
+- First public release, 0.1.0 (2026-11-13), and the rename to OpenAgency Social
+  (2026-11-23).
 
 ## Now
 
 - AI answers for direct messages and comments. A decision model sorts each
   new message or comment into answer automatically, draft for a person, or no
   answer needed; a model drafts the reply with the conversation as context.
-  Palazzo approves, and Banditore checks its own records again before any
+  Portal approves, and Social checks its own records again before any
   automatic send.
 - Revising a draft from a person's instruction ("make it shorter").
-- Events to Palazzo: a signed nudge when drafts, messages or reply receipts
-  change, so Palazzo reads them at once instead of on its schedule.
+- Events to Portal: a signed nudge when drafts, messages or reply receipts
+  change, so Portal reads them at once instead of on its schedule.
 
 ## Next
 

@@ -46,7 +46,7 @@ jobs:
           --health-retries 12
     env:
       REQUIRE_DATABASE_TESTS: 'true'
-      BANDITORE_TEST_POSTGRES_URL: postgres://postgres:ci-throwaway@postgres:5432/postgres
+      SOCIAL_TEST_POSTGRES_URL: postgres://postgres:ci-throwaway@postgres:5432/postgres
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
 

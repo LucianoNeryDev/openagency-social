@@ -122,7 +122,7 @@ export function createWebhookSender(options: { timeoutMs?: number,
     }
     const outgoing = request(url, {
       method: 'POST', lookup, timeout: timeoutMs, agent: false, ...(options.ca ? { ca: options.ca } : {}),
-      headers: { ...target.headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(target.body), 'user-agent': 'Banditore-Webhooks/1' },
+      headers: { ...target.headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(target.body), 'user-agent': 'OpenAgency-Social-Webhooks/1' },
     }, response => {
       const status = response.statusCode ?? 0
       const chunks: Buffer[] = []

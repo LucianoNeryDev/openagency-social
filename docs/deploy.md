@@ -24,7 +24,7 @@ owner: the first migration refuses an elevated runtime role.
 ## Engine
 
 ```sh
-docker build --build-arg VCS_REF=$(git rev-parse HEAD) -t banditore .
+docker build --build-arg VCS_REF=$(git rev-parse HEAD) -t openagency-social .
 ```
 
 Configuration comes from the environment; [.env.example](../.env.example)
@@ -110,7 +110,7 @@ provider app must be able to hold that kind of channel and serve that tenant.
 ## Browser runner
 
 ```sh
-docker build -f deploy/runner/Dockerfile --build-arg VCS_REF=$(git rev-parse HEAD) -t banditore-runner .
+docker build -f deploy/runner/Dockerfile --build-arg VCS_REF=$(git rev-parse HEAD) -t openagency-social-runner .
 pnpm vault keygen --out runner-key.json   # new key pair, written mode 600
 ```
 
@@ -124,7 +124,7 @@ checks).
 | `RUNNER_TOKEN` | At least 32 characters; the engine's `RUNNER_TOKEN` |
 | `RUNNER_PRIVATE_KEY` | From `vault keygen`; opens the sealed logins |
 | `RUNNER_VNC_PASSWORD` | Required; VNC on loopback `RUNNER_VNC_PORT` (5930), noVNC on `RUNNER_NOVNC_PORT` (6080) |
-| `RUNNER_DATA_DIR` | Persistent volume for browser profiles and `actions.json` |
+| `RUNNER_DATA_DIR` | Persistent volume for browser profiles and `actions.json`; default `/var/lib/openagency-social-runner`. While unset, a runner whose old default `/var/lib/leonessa-browser-runner` exists and the new one does not keeps using the old directory (logged once at start); that fallback is dropped in wave 3c |
 | `RUNNER_NTFY_URL` | Optional ntfy topic told when an account needs a person |
 | `RUNNER_DISPLAY` | X display, default `:47`; with host networking it must not collide with a host display |
 

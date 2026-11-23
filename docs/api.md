@@ -593,7 +593,9 @@ key                  HKDF-SHA256(ikm = SERVICE_TOKEN, salt = "comune-engine-even
 ```
 
 Both sides derive the key from the service token; there is nothing new to
-configure. A receiver checks the signature over the raw body in constant
+configure. The `x-comune-*` header names and the `comune-engine-events-v1` salt
+keep the suite's former name, Comune (now OpenAgency), because the receiver
+verifies exactly these values; renaming them would break the signature. A receiver checks the signature over the raw body in constant
 time, refuses a timestamp more than 300 s off, and answers `2xx` quickly.
 Test vector (`signControlEvent` in `src/control-events.ts`):
 

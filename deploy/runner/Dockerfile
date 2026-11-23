@@ -11,7 +11,7 @@ RUN pnpm build && pnpm prune --prod --ignore-scripts
 
 FROM mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea
 ARG VCS_REF
-LABEL org.opencontainers.image.title="Banditore Browser Runner" \
+LABEL org.opencontainers.image.title="OpenAgency Social Browser Runner" \
       org.opencontainers.image.revision="${VCS_REF}"
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify fonts-noto-color-emoji \

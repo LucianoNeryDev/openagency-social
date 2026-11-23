@@ -2,8 +2,30 @@
 
 ## Unreleased
 
-- Renamed the project to Banditore. Webhooks now send the user agent
-  `Banditore-Webhooks/1`.
+- Rename wave 3a, names read by other systems (the receiving side accepts both
+  names; nothing the engine sends changes): the CI database variable is now
+  `SOCIAL_TEST_POSTGRES_URL` (workflow, README and CONTRIBUTING; the test
+  fixture still falls back to `BANDITORE_TEST_POSTGRES_URL`), and the runner's
+  default `RUNNER_DATA_DIR` is `/var/lib/openagency-social-runner`. While
+  `RUNNER_DATA_DIR` is unset and the old default `/var/lib/leonessa-browser-runner`
+  exists but the new one does not, the runner keeps using the old directory and
+  logs it once, so an existing runner keeps its data. The old directory
+  fallback and the old variable name are dropped in wave 3c.
+- Renamed the remaining Banditore names: repository links
+  (`github.com/LucianoNeryDev/openagency-social`), the `package.json`
+  `repository` URL, the brand files (`docs/brand/social-*`) and the database
+  test container label (`social-test=postgres`; the fixture's cleanup also
+  removes containers that still carry the old `banditore-test` label).
+  Environment variables (`BANDITORE_TEST_POSTGRES_URL`), headers, signing
+  contexts, migrations and database names are unchanged.
+- Renamed the project from Banditore to OpenAgency Social, the social engine of
+  OpenAgency (formerly Comune); the control plane, Palazzo, is now OpenAgency
+  Portal. Only names in prose, image labels and the npm package name
+  (`openagency-social`) changed, and webhooks now send the user agent
+  `OpenAgency-Social-Webhooks/1`. Webhook payloads and event types, the
+  `x-comune-*` event headers and the signing key derivation, environment
+  variables, database names and job types are unchanged.
+- Renamed the project to Banditore.
 - AI answers: per-tenant answering settings (`PUT /v1/tenants/:org/answering`);
   a worker step that decides every new DM and comment (full, draft or none,
   with Liquid AI's System One) and drafts an answer with Claude; a draft

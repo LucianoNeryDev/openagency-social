@@ -8,21 +8,24 @@ import pg from 'pg'
 import * as schema from '../../src/db/schema.js'
 
 const command = promisify(execFile)
-// Same pinned PostgreSQL 17 image as the dashboard's database tests.
+// Same pinned PostgreSQL 17 image as the control plane's database tests.
 const image = 'postgres:17@sha256:aa90e97ee862e558111d34cfb8b2c4bec768c2b039fb791341686928560263b3'
-const label = 'banditore-test=postgres'
+const label = 'social-test=postgres'
+// Label of the fixture before the rename to OpenAgency Social; cleanup still removes containers that carry it.
+const legacyLabel = 'banditore-test=postgres'
 
 const roles = ['social_engine_migrator', 'social_engine_runtime']
 const databaseName = 'leonessa_social_engine'
 
 /**
  * A PostgreSQL 17 database with migrator and runtime roles. By default it is a disposable
- * container. When BANDITORE_TEST_POSTGRES_URL names a PostgreSQL server (a superuser URL, as a CI
+ * container. When SOCIAL_TEST_POSTGRES_URL (or the deprecated BANDITORE_TEST_POSTGRES_URL) names a PostgreSQL server (a superuser URL, as a CI
  * service container provides), that server is used instead and the database and roles are dropped
  * again afterwards; migrations fix their names, so run the suites one at a time against it.
  */
 export async function postgresFixture() {
-  const external = process.env.BANDITORE_TEST_POSTGRES_URL ? new URL(process.env.BANDITORE_TEST_POSTGRES_URL) : undefined
+  const externalUrl = process.env.SOCIAL_TEST_POSTGRES_URL || process.env.BANDITORE_TEST_POSTGRES_URL
+  const external = externalUrl ? new URL(externalUrl) : undefined
   const password = randomBytes(24).toString('hex')
   const pools: pg.Pool[] = []
   let id: string | undefined
@@ -41,6 +44,13 @@ export async function postgresFixture() {
     await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`)
     for (const role of roles) await adminPool.query(`DROP ROLE IF EXISTS ${role}`)
   }
+  // Containers left behind by runs from before the label was renamed would otherwise stay on a runner for good.
+  async function removeLegacyContainers() {
+    try {
+      const orphans = (await command('docker', ['ps', '-aq', '--filter', `label=${legacyLabel}`])).stdout.split('\n').filter(Boolean)
+      if (orphans.length > 0) await command('docker', ['rm', '-fv', ...orphans])
+    } catch { /* best effort: a failed sweep must not fail the suite */ }
+  }
   async function cleanup() {
     await Promise.all(pools.filter(value => value !== adminPool).map(value => value.end().catch(() => undefined)))
     if (external) {
@@ -51,8 +61,9 @@ export async function postgresFixture() {
     await adminPool?.end().catch(() => undefined)
     if (!id) return
     const inspection = JSON.parse((await command('docker', ['inspect', id])).stdout)[0]
-    if (inspection.Config.Labels['banditore-test'] !== 'postgres') throw new Error('Fixture ownership mismatch')
+    if (inspection.Config.Labels['social-test'] !== 'postgres') throw new Error('Fixture ownership mismatch')
     await command('docker', ['rm', '-fv', id])
+    await removeLegacyContainers()
   }
   try {
     if (!external) {

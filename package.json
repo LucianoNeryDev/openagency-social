@@ -1,12 +1,12 @@
 {
-  "name": "banditore",
+  "name": "openagency-social",
   "version": "0.1.0",
   "description": "Self-hosted engine that publishes and manages social media for many tenants",
   "license": "MIT",
   "author": "Luciano Nery <luciano@lucianonery.dev> (https://lucianonery.dev)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LucianoNeryDev/banditore"
+    "url": "https://github.com/LucianoNeryDev/openagency-social"
   },
   "type": "module",
   "private": true,
