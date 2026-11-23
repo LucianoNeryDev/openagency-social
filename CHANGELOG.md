@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Renamed the remaining Banditore names: repository links
+  (`github.com/LucianoNeryDev/openagency-social`), the `package.json`
+  `repository` URL, the brand files (`docs/brand/social-*`) and the database
+  test container label (`social-test=postgres`; the fixture's cleanup also
+  removes containers that still carry the old `banditore-test` label).
+  Environment variables (`BANDITORE_TEST_POSTGRES_URL`), headers, signing
+  contexts, migrations and database names are unchanged.
 - Renamed the project from Banditore to OpenAgency Social, the social engine of
   OpenAgency (formerly Comune); the control plane, Palazzo, is now OpenAgency
   Portal. Only names in prose, image labels and the npm package name

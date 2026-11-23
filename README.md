@@ -1,4 +1,4 @@
-<img src="docs/brand/banditore-icon.svg" alt="" width="96" height="96">
+<img src="docs/brand/social-icon.svg" alt="" width="96" height="96">
 
 # OpenAgency Social
 
