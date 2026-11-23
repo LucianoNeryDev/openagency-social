@@ -119,6 +119,8 @@ describe('Meta direct messages', () => {
   it('reports a refused read as unavailable and a rate limit as RateLimited', async () => {
     expect(await meta([graphError(403, 230, { message: 'Requires pages_messaging permission' })]).adapter.conversations(metaApp, { channel: page, token: 't' }))
       .toMatchObject({ kind: 'unavailable', reason: expect.stringContaining('pages_messaging') })
+    expect(await meta([graphError(400, 100, { message: 'Unsupported get request' })]).adapter.conversations(metaApp, { channel: igAccount, token: 't' }))
+      .toMatchObject({ kind: 'unavailable', reason: expect.stringContaining('Unsupported get request') })
     for (const code of [4, 17, 32, 613, 80006]) {
       await expect(meta([graphError(400, code)]).adapter.conversations(metaApp, { channel: page, token: 't' })).rejects.toBeInstanceOf(RateLimited)
     }
