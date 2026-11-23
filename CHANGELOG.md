@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Rename wave 4, the complete cut of the old names.
+  - Migrations no longer name a database or a role. Every grant goes to the
+    roles named by the database settings `openagency.migrator_role`,
+    `openagency.runtime_role` and the optional `openagency.backup_role`, which
+    the operator sets once per database (`ALTER DATABASE … SET`); a migration
+    fails with the setting's name when one is missing or names a role that
+    does not exist, and refuses to run as any role but the migrator. The
+    historical migrations were edited to match, `0016` included (it copied the
+    grants of `conversations`). Databases that already ran them are unaffected:
+    drizzle applies a migration by its journal timestamp and never re-reads an
+    applied file. The suite's own names are now `openagency_social[_<env>]`
+    with `social_{migrator,runtime,backup}[_<env>]` ([docs/deploy.md](docs/deploy.md#database)).
+  - The browser vault opens only logins sealed under `openagency-social-vault
+    v1:<account>`; the `leonessa-vault v1` fallback and `vault reseal` are
+    gone. Run `vault reseal` with the previous version before deploying this
+    one, or store the logins again with `vault put`.
+  - The runner's data directory defaults to `/var/lib/openagency-social-runner`
+    with no fallback to the old directory.
+  - The database tests read only `SOCIAL_TEST_POSTGRES_URL`, no longer remove
+    containers with the old `banditore-test` label, and create a backup role to
+    check its grants; a new suite checks the settings from a fresh database.
+  - The brand files (`docs/brand/social-*`) carry the OpenAgency Social
+    wordmark.
 - The browser vault's HKDF info label is now `openagency-social-vault
   v1:<account>` (was `leonessa-vault v1:<account>`). Logins are always sealed
   under the new label; the runner opens either, trying the new one first, and

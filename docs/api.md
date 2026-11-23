@@ -33,8 +33,6 @@ With `PUBLIC_MEDIA_URL` set, the worker gives URL-based platforms
 valid for one hour. `sig` is base64url HMAC-SHA256 over
 `<org>\n<mediaId>\n<expires>`, keyed with
 `HKDF-SHA256(service token, salt "", info "openagency-social media-url v1", 32 bytes)`.
-The control plane accepted URLs signed with the former info
-`leonessa-social-engine media-url v1` until wave 3c; they are no longer made.
 The dashboard verifies the signature and expiry, then reads the bytes with the
 route above.
 
@@ -595,9 +593,7 @@ key                      HKDF-SHA256(ikm = SERVICE_TOKEN, salt = "openagency-eng
 ```
 
 Both sides derive the key from the service token; there is nothing new to
-configure. Until wave 3c the control plane also accepted the former
-`x-comune-*` headers signed with the salt `comune-engine-events-v1`; the engine
-no longer sends them, and the two sets are never mixed. A receiver checks the signature over the raw body in constant
+configure. A receiver checks the signature over the raw body in constant
 time, refuses a timestamp more than 300 s off, and answers `2xx` quickly.
 Test vector (`signControlEvent` in `src/control-events.ts`):
 
@@ -746,9 +742,7 @@ public key with `pnpm vault put`; the engine stores them but cannot open them,
 and no route returns them.
 
 A login's key is derived (HKDF-SHA256) from an X25519 exchange under the label
-`openagency-social-vault v1:<account>`. The runner also opens logins sealed
-before the rename under `leonessa-vault v1:<account>`; `vault reseal` moves
-stored logins to the current label ([docs/deploy.md](deploy.md)).
+`openagency-social-vault v1:<account>`.
 
 | Route | Purpose |
 | --- | --- |

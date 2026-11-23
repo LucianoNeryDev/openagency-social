@@ -6,7 +6,7 @@ OpenAgency Social is the social engine of OpenAgency, a self-hosted suite for
 running a digital agency. It publishes and manages social media for many
 clients at once: it posts, reads statistics and comments, sends approved
 replies and direct messages, and tells your applications what happened through
-signed webhooks. It was called Banditore until 2026-11-23.
+signed webhooks.
 
 The engine is the execution layer only. A control plane (your dashboard or
 app) owns tenants, drafts, approval and audit, and sends the engine approved

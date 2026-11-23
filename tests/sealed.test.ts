@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createDecipheriv, createPrivateKey, createPublicKey, diffieHellman, hkdfSync } from 'node:crypto'
-import { isRunnerPublicKey, openSealedSecret, openSecret, runnerKeyPair, runnerPublicKeyFor, sealSecret, type SealedSecret } from '../src/crypto/sealed.js'
-import { sealLegacySecret } from './fixtures/legacy-seal.js'
+import { createCipheriv, createDecipheriv, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes } from 'node:crypto'
+import { isRunnerPublicKey, openSecret, runnerKeyPair, runnerPublicKeyFor, sealSecret, type SealedSecret } from '../src/crypto/sealed.js'
 
 const secret = JSON.stringify({ username: 'bottega.digitale', password: 'correct horse battery staple', totp: 'JBSWY3DPEHPK3PXP' })
 
@@ -26,28 +25,17 @@ describe('sealed secrets', () => {
     expect(() => openSecret(runner.privateKey, 'account-1', { ...sealed, nonce: Buffer.alloc(8) })).toThrow('Malformed')
   })
 
-  it('opens blobs sealed under the pre-rename label and says so', () => {
-    const legacy = sealLegacySecret(runner.publicKey, 'account-1', secret)
-    expect(openSecret(runner.privateKey, 'account-1', legacy)).toBe(secret)
-    expect(openSealedSecret(runner.privateKey, 'account-1', legacy)).toEqual({ plaintext: secret, label: 'legacy' })
-    expect(() => openSecret(runner.privateKey, 'account-2', legacy)).toThrow()
-  })
-
-  it('seals under the current label only', () => {
+  it('seals under the openagency-social-vault label only', () => {
     const sealed = sealSecret(runner.publicKey, 'account-1', secret)
-    expect(openSealedSecret(runner.privateKey, 'account-1', sealed)).toEqual({ plaintext: secret, label: 'current' })
-    // An independent derivation: the current label opens it, the pre-rename one does not.
+    // An independent derivation: the label opens it, any other does not.
     expect(openWithLabel(runner.privateKey, 'openagency-social-vault v1', 'account-1', sealed)).toBe(secret)
-    expect(() => openWithLabel(runner.privateKey, 'leonessa-vault v1', 'account-1', sealed)).toThrow()
+    expect(() => openWithLabel(runner.privateKey, 'another-vault v1', 'account-1', sealed)).toThrow()
   })
 
-  it('fails as before when neither label authenticates', () => {
-    for (const sealed of [sealSecret(runner.publicKey, 'account-1', secret), sealLegacySecret(runner.publicKey, 'account-1', secret)]) {
-      const flipped = Buffer.from(sealed.ciphertext)
-      flipped[flipped.length - 1]! ^= 1
-      expect(() => openSealedSecret(runner.privateKey, 'account-1', { ...sealed, ciphertext: flipped })).toThrow('unable to authenticate data')
-      expect(() => openSecret(runnerKeyPair().privateKey, 'account-1', sealed)).toThrow('unable to authenticate data')
-    }
+  it('opens nothing sealed under another label', () => {
+    const other = sealWithLabel(runner.publicKey, 'another-vault v1', 'account-1', secret)
+    expect(openWithLabel(runner.privateKey, 'another-vault v1', 'account-1', other)).toBe(secret)
+    expect(() => openSecret(runner.privateKey, 'account-1', other)).toThrow('unable to authenticate data')
   })
 
   it('derives the public key from the private key', () => {
@@ -71,4 +59,16 @@ function openWithLabel(runnerPrivateKey: string, label: string, accountId: strin
   decipher.setAAD(Buffer.from(`account:${accountId}`))
   decipher.setAuthTag(sealed.ciphertext.subarray(-16))
   return Buffer.concat([decipher.update(sealed.ciphertext.subarray(0, -16)), decipher.final()]).toString('utf8')
+}
+
+function sealWithLabel(runnerPublicKey: string, label: string, accountId: string, plaintext: string): SealedSecret {
+  const ephemeral = generateKeyPairSync('x25519')
+  const ephemeralPublicKey = Buffer.from(ephemeral.publicKey.export({ format: 'jwk' }).x!, 'base64url')
+  const recipient = createPublicKey({ key: { kty: 'OKP', crv: 'X25519', x: runnerPublicKey }, format: 'jwk' })
+  const salt = Buffer.concat([ephemeralPublicKey, Buffer.from(runnerPublicKey, 'base64url')])
+  const key = Buffer.from(hkdfSync('sha256', diffieHellman({ privateKey: ephemeral.privateKey, publicKey: recipient }), salt, `${label}:${accountId}`, 32))
+  const nonce = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 })
+  cipher.setAAD(Buffer.from(`account:${accountId}`))
+  return { ephemeralPublicKey, nonce, ciphertext: Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final(), cipher.getAuthTag()]) }
 }
