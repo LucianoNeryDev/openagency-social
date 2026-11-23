@@ -53,12 +53,12 @@ pnpm test:db     # when the change touches the database
 `pnpm test:db` runs the PostgreSQL integration suites
 (`tests/*.integration.test.ts`). By default each suite starts a disposable
 PostgreSQL 17 container, so Docker must be available. To use a server you
-already have, set `BANDITORE_TEST_POSTGRES_URL` to a superuser URL such as
+already have, set `SOCIAL_TEST_POSTGRES_URL` to a superuser URL such as
 `postgres://postgres:secret@127.0.0.1:5432/postgres` and run the suites one at a
 time:
 
 ```sh
-BANDITORE_TEST_POSTGRES_URL=postgres://postgres:secret@127.0.0.1:5432/postgres \
+SOCIAL_TEST_POSTGRES_URL=postgres://postgres:secret@127.0.0.1:5432/postgres \
   pnpm test:db --no-file-parallelism
 ```
 

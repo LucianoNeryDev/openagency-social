@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { errorFields, log, registerLogSecrets } from '../log.js'
 import { ActionStore } from './actions.js'
 import { Profiles } from './browser.js'
+import { resolveRunnerDataDir } from './data-dir.js'
 import { Executor } from './executor.js'
 import { createRunnerApp } from './http.js'
 import { downloadMedia } from './media.js'
@@ -23,15 +24,16 @@ const config = z.object({
   RUNNER_PORT: z.coerce.number().int().min(1).max(65_535).default(3430),
   RUNNER_TOKEN: singleLine.refine(value => value.length >= 32),
   RUNNER_PRIVATE_KEY: singleLine,
-  RUNNER_DATA_DIR: z.string().default('/var/lib/leonessa-browser-runner'),
+  RUNNER_DATA_DIR: z.string().optional(),
   RUNNER_NTFY_URL: z.url({ protocol: /^https$/ }).optional(),
   CHROMIUM_PATH: z.string().optional(),
 }).parse(process.env)
 registerLogSecrets([config.RUNNER_TOKEN, config.RUNNER_PRIVATE_KEY])
+const dataDir = resolveRunnerDataDir(config.RUNNER_DATA_DIR)
 
-mkdirSync(join(config.RUNNER_DATA_DIR, 'profiles'), { recursive: true, mode: 0o700 })
-const store = new ActionStore(join(config.RUNNER_DATA_DIR, 'actions.json'))
-const profiles = new Profiles(join(config.RUNNER_DATA_DIR, 'profiles'), config.CHROMIUM_PATH)
+mkdirSync(join(dataDir, 'profiles'), { recursive: true, mode: 0o700 })
+const store = new ActionStore(join(dataDir, 'actions.json'))
+const profiles = new Profiles(join(dataDir, 'profiles'), config.CHROMIUM_PATH)
 const executor = new Executor({
   store,
   runnerPrivateKey: config.RUNNER_PRIVATE_KEY,
