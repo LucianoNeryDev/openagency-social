@@ -6,7 +6,6 @@ import { z } from 'zod'
 import { errorFields, log, registerLogSecrets } from '../log.js'
 import { ActionStore } from './actions.js'
 import { Profiles } from './browser.js'
-import { resolveRunnerDataDir } from './data-dir.js'
 import { Executor } from './executor.js'
 import { createRunnerApp } from './http.js'
 import { downloadMedia } from './media.js'
@@ -24,12 +23,13 @@ const config = z.object({
   RUNNER_PORT: z.coerce.number().int().min(1).max(65_535).default(3430),
   RUNNER_TOKEN: singleLine.refine(value => value.length >= 32),
   RUNNER_PRIVATE_KEY: singleLine,
-  RUNNER_DATA_DIR: z.string().optional(),
+  // Browser profiles and actions.json; a persistent volume.
+  RUNNER_DATA_DIR: z.string().min(1).default('/var/lib/openagency-social-runner'),
   RUNNER_NTFY_URL: z.url({ protocol: /^https$/ }).optional(),
   CHROMIUM_PATH: z.string().optional(),
 }).parse(process.env)
 registerLogSecrets([config.RUNNER_TOKEN, config.RUNNER_PRIVATE_KEY])
-const dataDir = resolveRunnerDataDir(config.RUNNER_DATA_DIR)
+const dataDir = config.RUNNER_DATA_DIR
 
 mkdirSync(join(dataDir, 'profiles'), { recursive: true, mode: 0o700 })
 const store = new ActionStore(join(dataDir, 'actions.json'))
