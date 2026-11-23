@@ -99,11 +99,12 @@ describe.skipIf(!required)('vault reseal on PostgreSQL 17', () => {
   })
 
   it('refuses to run without a usable runner private key and never echoes it', async () => {
+    const notAKey = Buffer.from('not a runner private key').toString('base64')
     const failure = await run(process.execPath, ['--import', 'tsx', 'src/cli/vault.ts', 'reseal', '--dry-run'],
-      { cwd: root, env: { ...process.env, DATABASE_URL: 'postgres://unused@127.0.0.1:1/unused', RUNNER_PRIVATE_KEY: 'c2VjcmV0LW5vdC1hLWtleQ' } })
+      { cwd: root, env: { ...process.env, DATABASE_URL: 'postgres://unused@127.0.0.1:1/unused', RUNNER_PRIVATE_KEY: notAKey } })
       .then(() => undefined, (error: unknown) => error) as { code: number, stderr: string } | undefined
     expect(failure?.code).not.toBe(0)
     expect(failure?.stderr).toContain('RUNNER_PRIVATE_KEY is missing or not an X25519 private key')
-    expect(failure?.stderr).not.toContain('c2VjcmV0LW5vdC1hLWtleQ')
+    expect(failure?.stderr).not.toContain(notAKey)
   }, 60_000)
 })
