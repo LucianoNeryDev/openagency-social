@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- WhatsApp business numbers as message-only channels ([ADR
+  0006](docs/adr/0006-whatsapp-numbers.md)): platform `whatsapp`, kind
+  `whatsapp_number`, messaging platform `whatsapp`. Login for Business
+  connects every number of the granted business accounts and subscribes the
+  app; `POST /v1/tenants/:org/whatsapp/numbers` connects one number with an
+  operator's token. `POST /v1/whatsapp/notifications` takes Meta's webhook
+  body and signature from the dashboard, checks the signature with the
+  channel's own app, and stores messages once (by `wamid`). Sends carry the
+  outgoing ID in `biz_opaque_callback_data`, are stored in the conversation,
+  mark the person's message read, and follow Meta's statuses
+  (`deliveryStatus`, `deliveryErrorCode` and `deliveryUpdatedAt` on outgoing
+  messages); a status that names an uncertain send settles it. Received
+  media are read from Meta on request
+  (`GET …/messages/:message/attachments/:index`). Outside the 24-hour window
+  `outside_window` carries `templateRequired: true`; templates are not sent.
+  Conversations gain `participant.phone` on WhatsApp. Migration `0017`
+  widens the platform, kind and messaging-platform checks and adds
+  `channels.parent_external_id` and four nullable columns to
+  `outgoing_messages`. No new configuration.
+- Drafts of direct messages (Messenger, Instagram, WhatsApp) follow a chat
+  style: the answer first, one to three short sentences, no greeting or
+  sign-off unless the person's greeting calls for one, no filler or restated
+  question, plain text, one clear next step. Comment replies keep their
+  style.
+
 - Rename wave 4, the complete cut of the old names.
   - Migrations no longer name a database or a role. Every grant goes to the
     roles named by the database settings `openagency.migrator_role`,

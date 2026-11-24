@@ -84,6 +84,31 @@ pnpm provider-app --id meta-agency --platform meta --external-app-id <app id> --
 describes. In the container the same commands are
 `node dist/cli/provider-app.js` and `node dist/cli/channel.js`.
 
+## WhatsApp
+
+WhatsApp numbers connect through a provider app of platform `whatsapp`. It
+may be the same Meta app as the `meta` one, registered again with its own
+Login for Business configuration, and the same secret reference:
+
+```sh
+pnpm provider-app --id meta-agency-whatsapp --platform whatsapp --external-app-id <app id> \
+  --secret-ref meta-agency --config-id <WhatsApp configuration id>
+```
+
+On Meta's side: add the WhatsApp product to the app; create a Login for
+Business configuration with the `whatsapp_business_management` and
+`whatsapp_business_messaging` permissions (preferably issuing a system-user
+token that does not expire); subscribe the app's webhook (the dashboard's
+Meta receiver, the same callback URL and verify token as Messenger) to the
+`whatsapp_business_account` object's `messages` field; and get Advanced
+Access to both permissions (Business Verification and App Review) before
+numbers of other businesses connect. The engine needs nothing new: the
+callback is `META_REDIRECT_URI`, and the receiver checks the signature with
+the app secret the dashboard holds, which must be this app's.
+
+An operator can also connect one number with a system user's token
+(`POST /v1/tenants/:org/whatsapp/numbers`, see [api.md](api.md#whatsapp)).
+
 ## Comment replies
 
 Replies need a permission on each provider's side, and channels must connect

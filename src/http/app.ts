@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import { sql } from 'drizzle-orm'
 import {
   createApp, createRouter, defineEventHandler, getQuery, getRequestHeader, getRouterParam, readRawBody,
@@ -19,6 +20,7 @@ import { readResponses, watchResponses } from '../responses.js'
 import { cancelReply, listReplies, replySubmissionSchema, resolveReply, submitReply } from '../replies.js'
 import { getConversation, listConversationMessages, listConversations, notifyMeta, requestConversationSync } from '../conversations.js'
 import { cancelMessage, listOutgoingMessages, messageSubmissionSchema, resolveMessage, submitMessage } from '../messages.js'
+import { connectWhatsAppNumber, readAttachment, receiveWhatsAppNotification, whatsappConnectSchema } from '../whatsapp.js'
 import { outgoingMessageStates } from '../db/schema.js'
 import { answeringPutSchema, getAnswering, putAnswering } from '../answering/settings.js'
 import { ackDraftOutbox, listDraftOutbox } from '../answering/drafts.js'
@@ -28,6 +30,8 @@ import { createWebhook, deleteWebhook, listDeliveries, listWebhooks, redeliver, 
   webhookUpdateSchema } from '../webhooks.js'
 
 const maxJsonBytes = 1_000_000
+/** Meta batches up to 1,000 updates in one notification; the dashboard takes at most 1 MiB. */
+const maxNotificationBytes = 1_100_000
 const organizationId = z.string().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/)
 const identifier = z.string().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/)
 const settings = z.record(z.string(), z.unknown()).refine(value => JSON.stringify(value).length <= 10_000, 'settings too large')
@@ -185,6 +189,28 @@ export function createEngineApp(context: EngineContext, serviceToken: string) {
     const body = z.strictObject({ objects: z.array(z.strictObject({ object: z.enum(['page', 'instagram']), id: z.string().regex(/^\d{1,30}$/) })).min(1).max(100) })
       .parse(await readJson(event))
     return notifyMeta(context, body.objects)
+  }))
+  // From the dashboard's Meta webhook receiver: a WhatsApp notification as Meta sent it, with Meta's signature, which the engine
+  // checks with the app of each number it names before storing anything (ADR 0006). Not tenant-scoped.
+  router.post('/v1/whatsapp/notifications', authed(async event => {
+    if (!String(getRequestHeader(event, 'content-type') ?? '').startsWith('application/json')) throw new EngineError(415, 'unsupported_media_type', 'Expected application/json')
+    const body = await readBody(event, maxNotificationBytes)
+    return receiveWhatsAppNotification(context, body, getRequestHeader(event, 'x-hub-signature-256'))
+  }))
+  // The operator's manual WhatsApp connect: a token for one number of a business account.
+  router.post('/v1/tenants/:org/whatsapp/numbers', authed(async event => {
+    const result = await connectWhatsAppNumber(context, organizationId.parse(getRouterParam(event, 'org')), whatsappConnectSchema.parse(await readJson(event)))
+    setResponseStatus(event, 201)
+    return result
+  }))
+  // A received attachment's bytes, read from the platform on request (WhatsApp keeps media IDs, never URLs).
+  router.get('/v1/tenants/:org/conversations/:conversation/messages/:message/attachments/:index', authed(async event => {
+    const file = await readAttachment(context, organizationId.parse(getRouterParam(event, 'org')), z.uuid().parse(getRouterParam(event, 'conversation')),
+      z.uuid().parse(getRouterParam(event, 'message')), z.coerce.number().int().min(0).max(19).parse(getRouterParam(event, 'index')))
+    setResponseHeaders(event, { 'content-type': file.mimeType, ...(file.sizeBytes !== null ? { 'content-length': file.sizeBytes } : {}), 'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff', ...(file.name ? { 'x-attachment-name': encodeURIComponent(file.name) } : {}) })
+    // A failure part way through closes the connection, so the reader sees a short file.
+    await pipeline(Readable.fromWeb(file.body as NodeReadableStream<Uint8Array>), event.node.res).catch(() => undefined)
   }))
   router.post('/v1/tenants/:org/messages', authed(async event => {
     const org = organizationId.parse(getRouterParam(event, 'org'))

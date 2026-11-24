@@ -4,13 +4,14 @@ import { providerApps, type Platform } from './db/schema.js'
 import { notFound } from './errors.js'
 import { defaultInstagramScopes } from './platforms/instagram/adapter.js'
 import { defaultMetaScopes } from './platforms/meta/adapter.js'
+import { defaultWhatsAppScopes } from './platforms/whatsapp/adapter.js'
 import { defaultYoutubeScopes, youtubeReplyScope } from './platforms/youtube/adapter.js'
 
 const googleScopePrefix = 'https://www.googleapis.com/auth/'
 
 /** What each OAuth platform asks for when a provider app pins no scopes. */
 export const defaultScopes: Partial<Record<Platform, readonly string[]>> = {
-  meta: defaultMetaScopes, instagram: defaultInstagramScopes, youtube: defaultYoutubeScopes,
+  meta: defaultMetaScopes, instagram: defaultInstagramScopes, youtube: defaultYoutubeScopes, whatsapp: defaultWhatsAppScopes,
 }
 
 /**

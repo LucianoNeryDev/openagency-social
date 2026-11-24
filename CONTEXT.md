@@ -13,14 +13,16 @@ makes no approval decisions.
 - **Platform** — a social network family with one API surface: `meta`
   (Facebook Pages and the Instagram accounts linked to them), `instagram`
   (Instagram accounts connected with Instagram's own login, without a Page),
-  `youtube`, and the browser platforms `tiktok`, `x`, `linkedin`, `threads`,
-  `pinterest` and `reddit`.
+  `youtube`, `whatsapp` (WhatsApp business numbers, through the Cloud API),
+  and the browser platforms `tiktok`, `x`, `linkedin`, `threads`, `pinterest`
+  and `reddit`.
 - **Provider app** — a developer application registered on a platform (a Meta
   app, an X project, a TikTok app). It has an owner: one tenant, or the agency
   when it is shared. Its secret is stored outside the database and referenced
   by name.
 - **Channel** — one connected account on a platform (a Facebook Page, an
-  Instagram professional account, an X user). A channel belongs to exactly one
+  Instagram professional account, an X user, a WhatsApp business phone
+  number). A channel belongs to exactly one
   tenant and was authorized through exactly one provider app.
 - **Channel credential** — the token (and refresh token) a channel's owner
   granted through OAuth, or imported from another publisher by an operator.
@@ -56,12 +58,18 @@ makes no approval decisions.
   settles as sent; the resolution stays as the record of the conflict.
 - **Rival** — another reply under the same comment with the same text that
   may own a match: reconciliation then leaves both to a person.
-- **Conversation** — a Messenger or Instagram thread between a channel and
-  one person (the **participant**), read by the conversation sync. Its
+- **Conversation** — a Messenger, Instagram or WhatsApp thread between a
+  channel and one person (the **participant**), read by the conversation
+  sync, or for WhatsApp received in **notifications** the dashboard forwards
+  with Meta's signature (there is nothing to read back). Its
   messages (**direct messages**) are third-party content, stored once and
   deleted 180 days after they were sent.
 - **Answering window** — the 24 hours after the participant's last message,
-  within which Meta lets the channel answer.
+  within which Meta lets the channel answer. Outside it WhatsApp takes only
+  an approved **template**, which the engine does not send.
+- **Delivery status** — what WhatsApp reported about a sent message
+  afterwards: sent, delivered, read, or failed with a code. It never changes
+  whether the message was sent.
 - **Outgoing message** — one submitted revision of a direct message from the
   dashboard, sent at most once under the reply contract (request key,
   tombstones, claim, reconciliation, resolution).
@@ -103,8 +111,10 @@ makes no approval decisions.
 - Pause is enforced in both places: the dashboard stops submitting, and the
   engine refuses to start an attempt for a paused tenant or channel.
 - Incoming platform content (comments, DMs) is untrusted input. Whatever reads
-  it does not hold publishing tools: the conversation sync has no sending
-  code. Replies are written and approved by people in the dashboard; direct
+  it does not hold publishing tools: the conversation sync and the WhatsApp
+  notification receiver have no sending code. A WhatsApp notification is
+  read only after the engine checked Meta's signature with the channel's own
+  app (ADR 0006). Replies are written and approved by people in the dashboard; direct
   messages may also come from the dashboard's rules or models. The engine
   only sends what it was given.
 - The engine may decide and draft answers (ADR 0004), in a step separate
