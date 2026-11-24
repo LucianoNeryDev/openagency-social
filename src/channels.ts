@@ -7,7 +7,7 @@ import {
   channelCredentials, channels, conversationChecks, jobs, oauthStates, outgoingMessages, publishingControls, replies, type ChannelKind, type Platform,
 } from './db/schema.js'
 import { conflict, EngineError, invalid, notFound } from './errors.js'
-import type { ChannelTarget } from './platforms/types.js'
+import type { ChannelTarget, ConnectedAccount } from './platforms/types.js'
 import { messageAvailability, replyAvailability, type MessageAvailability, type ReplyAvailability } from './reply-availability.js'
 import { forgetChannelConversations, forgetChannelResponses } from './retention.js'
 import { changeChannelStatus, emitChannelStatus } from './webhooks.js'
@@ -55,25 +55,30 @@ export async function finishConnect(context: EngineContext, organizationId: stri
   const accounts = await adapterFor(context, app.platform).finishConnect(app, code)
   const connected = await context.db.transaction(async transaction => {
     const ids: string[] = []
-    for (const account of accounts) {
-      // A new grant: its scopes as the platform reported them, and no permission refused yet.
-      const grant = { grantedScopes: account.grantedScopes ?? null, refusedScopes: [] }
-      const previous = await previousStatus(transaction, app.id, account.externalId, organizationId)
-      const [channel] = await transaction.insert(channels).values({ organizationId, providerAppId: app.id, platform: app.platform,
-        kind: account.kind, externalId: account.externalId, name: account.name, ...grant })
-        .onConflictDoUpdate({ target: [channels.providerAppId, channels.externalId, channels.organizationId],
-          set: { name: account.name, kind: account.kind, status: 'active', ...grant, updatedAt: clock(context) } })
-        .returning()
-      await emitChannelStatus(transaction, channel!, previous, previous ? 'reconnected' : 'connected', clock(context))
-      await storeCredential(context, transaction, channel!.id, { accessToken: account.token, expiresAt: account.tokenExpiresAt,
-        ...(account.refreshToken ? { refreshToken: account.refreshToken } : {}) })
-      await scheduleConversations(context, transaction, channel!)
-      await recordEvent(transaction, { organizationId, kind: 'channel.connected', channelId: channel!.id, detail: { providerAppId: app.id, externalId: account.externalId } })
-      ids.push(channel!.id)
-    }
+    for (const account of accounts) ids.push(await storeConnectedAccount(context, transaction, organizationId, app.id, app.platform, account, 'channel.connected'))
     return ids
   })
   return { channels: connected.length ? await listChannels(context, organizationId, connected) : [] }
+}
+
+/** Stores one account a connect returned as the tenant's channel, with its sealed grant, as connected or reconnected. Returns the channel ID. */
+export async function storeConnectedAccount(context: EngineContext, transaction: Executor, organizationId: string, providerAppId: string, platform: Platform,
+  account: ConnectedAccount, eventKind: string) {
+  // A new grant: its scopes as the platform reported them, and no permission refused yet.
+  const grant = { grantedScopes: account.grantedScopes ?? null, refusedScopes: [] }
+  const parent = { parentExternalId: account.parentExternalId ?? null }
+  const previous = await previousStatus(transaction, providerAppId, account.externalId, organizationId)
+  const [channel] = await transaction.insert(channels).values({ organizationId, providerAppId, platform,
+    kind: account.kind, externalId: account.externalId, name: account.name, ...parent, ...grant })
+    .onConflictDoUpdate({ target: [channels.providerAppId, channels.externalId, channels.organizationId],
+      set: { name: account.name, kind: account.kind, status: 'active', ...parent, ...grant, updatedAt: clock(context) } })
+    .returning()
+  await emitChannelStatus(transaction, channel!, previous, previous ? 'reconnected' : 'connected', clock(context))
+  await storeCredential(context, transaction, channel!.id, { accessToken: account.token, expiresAt: account.tokenExpiresAt,
+    ...(account.refreshToken ? { refreshToken: account.refreshToken } : {}) })
+  await scheduleConversations(context, transaction, channel!)
+  await recordEvent(transaction, { organizationId, kind: eventKind, channelId: channel!.id, detail: { providerAppId, externalId: account.externalId } })
+  return channel!.id
 }
 
 /**
@@ -81,7 +86,9 @@ export async function finishConnect(context: EngineContext, organizationId: stri
  * connect: a reconnect clears the last failure and any backoff.
  */
 async function scheduleConversations(context: EngineContext, executor: Executor, channel: typeof channels.$inferSelect) {
-  if (!context.adapters.get(channel.platform)?.messageRules?.(channel.kind)) return
+  const rules = context.adapters.get(channel.platform)?.messageRules?.(channel.kind)
+  // Webhook-only kinds (WhatsApp) have nothing to read.
+  if (!rules || rules.inbound === 'webhook') return
   const now = clock(context)
   const values = { nextCheckAt: now, failureCount: 0, lastError: null, backoffUntil: null, rateLimitCount: 0, updatedAt: now }
   // A reconnect keeps the time watching began, so it announces nothing twice.
@@ -101,6 +108,7 @@ const platformKinds: Record<Platform, readonly ChannelKind[]> = {
   meta: ['facebook_page', 'instagram_account'], instagram: ['instagram_account'], youtube: ['youtube_channel'],
   // Browser platforms have no OAuth grants to import.
   tiktok: [], x: [], linkedin: [], threads: [], pinterest: [], reddit: [],
+  whatsapp: ['whatsapp_number'],
 }
 
 export interface ImportedChannel {

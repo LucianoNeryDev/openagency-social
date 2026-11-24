@@ -120,6 +120,20 @@
       "when": 1794787211123,
       "tag": "0016_ai_answers",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1795513353003,
+      "tag": "0017_whatsapp",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795522008347,
+      "tag": "0018_outgoing_error_detail",
+      "breakpoints": true
     }
   ]
 }

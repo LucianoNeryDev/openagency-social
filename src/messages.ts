@@ -20,7 +20,7 @@ import { changeChannelStatus, emitMessageOutcome } from './webhooks.js'
 import { messageDigest } from './digests.js'
 import { approvalFields, approvalRefinement, approvalRefinementMessage, checkAutomation } from './answering/drafts.js'
 import { queueControlEvent } from './control-events.js'
-import type { ApprovedVia } from './db/schema.js'
+import type { ApprovedVia, DeliveryStatus } from './db/schema.js'
 
 // Direct messages, send side: the exactly-once contract of comment
 // replies, for one table of outgoing messages.
@@ -51,6 +51,25 @@ const messagesPerPass = 10
 const reconcilesPerPass = 5
 
 export { messageDigest }
+
+/** The longest platform error detail kept with a message. */
+export const maxErrorDetailLength = 300
+
+/**
+ * A platform's error as it may be stored and logged: the platform's codes and
+ * a short message, with anything that looks like a phone number, an email
+ * address or a link replaced, so a person's details never reach the record.
+ */
+export function safeErrorDetail(detail: string | undefined) {
+  if (!detail) return null
+  const cleaned = detail.replace(/\s+/g, ' ')
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]')
+    .replace(/\bhttps?:\/\/\S+/gi, '[link]')
+    // Error codes (up to six digits, as in 131047 or 2494010 after a slash) stay; longer runs are numbers or IDs of people.
+    .replace(/\+?\d[\d ().-]{6,}\d/g, match => /^\d{1,7}$/.test(match) ? match : '[number]')
+    .trim()
+  return Array.from(cleaned).slice(0, maxErrorDetailLength).join('') || null
+}
 
 /** One key per (organization, dashboard message, revision, digest): a second submission of it is the same message. */
 export function messageRequestKey(organizationId: string, messageId: string, revision: number, digest: string) {
@@ -100,6 +119,8 @@ export interface OutgoingMessageView {
   draftId: string | null
   state: OutgoingMessageState
   errorCode: string | null
+  /** The platform's error code and a short message, without personal details (`safeErrorDetail`); null once sent. */
+  errorDetail: string | null
   permission: string | null
   platformMessageId: string | null
   /** Always null: Meta gives messages no permalink. Kept so the view mirrors a reply's. */
@@ -114,6 +135,11 @@ export interface OutgoingMessageView {
   directMessageId: string | null
   resolution: 'sent' | 'not_sent' | null
   notSentAllowed: boolean
+  /** Where the platform reports it got to after the send (WhatsApp): `sent`, `delivered`, `read` or `failed`; null where it does not report. */
+  deliveryStatus: DeliveryStatus | null
+  /** For a `failed` delivery: `outside_window`, `recipient_unavailable`, `message_not_allowed`, `rate_limited` or `rejected`. */
+  deliveryErrorCode: string | null
+  deliveryUpdatedAt: string | null
   updatedAt: string
 }
 
@@ -125,11 +151,12 @@ export function outgoingView(message: Outgoing, directMessageId: string | null =
   return {
     id: message.id, requestKey: message.requestKey, messageId: message.messageId, revision: message.revision, digest: message.digest,
     conversationId: message.conversationId, channelId: message.channelId, approvedVia: message.approvedVia, draftId: message.draftId, state: message.state,
-    errorCode: message.errorCode,
+    errorCode: message.errorCode, errorDetail: message.errorDetail ?? null,
     permission: message.permission ? permissionName(message.permission) : null, platformMessageId: message.platformMessageId, url: null, attemptCount: message.attemptCount,
     reconciling: message.reconciling, sendAt: message.sendAt.toISOString(), attemptedAt: message.attemptedAt?.toISOString() ?? null,
     settledAt: message.settledAt?.toISOString() ?? null, settledBy: message.settledBy ?? null, directMessageId, resolution: message.resolution ?? null,
-    notSentAllowed: notSentAllowed(message), updatedAt: message.updatedAt.toISOString(),
+    notSentAllowed: notSentAllowed(message), deliveryStatus: message.deliveryStatus ?? null, deliveryErrorCode: message.deliveryErrorCode ?? null,
+    deliveryUpdatedAt: message.deliveryUpdatedAt?.toISOString() ?? null, updatedAt: message.updatedAt.toISOString(),
   }
 }
 
@@ -138,9 +165,10 @@ function tombstoneView(row: typeof outgoingMessageCancellations.$inferSelect, in
   return {
     id: null, requestKey: row.requestKey, messageId: input?.messageId ?? null, revision: input?.revision ?? null, digest: input?.digest ?? null,
     conversationId: input?.conversationId ?? null, channelId: null, approvedVia: input ? input.approvedVia ?? 'person' : null, draftId: input?.draftId ?? null,
-    state: 'cancelled', errorCode: 'cancelled_before_submit', permission: null,
+    state: 'cancelled', errorCode: 'cancelled_before_submit', errorDetail: null, permission: null,
     platformMessageId: null, url: null, attemptCount: 0, reconciling: false, sendAt: input ? new Date(input.sendAt).toISOString() : null, attemptedAt: null,
-    settledAt: at, settledBy: null, directMessageId: null, resolution: null, notSentAllowed: false, updatedAt: at,
+    settledAt: at, settledBy: null, directMessageId: null, resolution: null, notSentAllowed: false, deliveryStatus: null, deliveryErrorCode: null,
+    deliveryUpdatedAt: null, updatedAt: at,
   }
 }
 
@@ -230,7 +258,9 @@ export async function submitMessage(context: EngineContext, organizationId: stri
     const controls = await readPublishing(transaction, organizationId)
     if (controls.paused || controls.pausedChannelIds.includes(channel.id)) throw conflict('paused', 'Publishing is paused')
     if (!windowOpenAt(conversation.lastInboundAt, sendAt)) {
-      throw conflict('outside_window', 'The person last wrote more than 24 hours before sendAt', { windowOpenUntil: windowOpenUntil(conversation.lastInboundAt)?.toISOString() ?? null })
+      // Outside the window WhatsApp takes only an approved template, which the engine does not send.
+      throw conflict('outside_window', 'The person last wrote more than 24 hours before sendAt', { windowOpenUntil: windowOpenUntil(conversation.lastInboundAt)?.toISOString() ?? null,
+        ...(conversation.platform === 'whatsapp' ? { templateRequired: true } : {}) })
     }
 
     // Counted under a lock per channel, so concurrent submissions cannot both pass.
@@ -412,8 +442,34 @@ async function sendClaimed(context: EngineContext, claimed: ClaimedMessage): Pro
     .where(and(eq(outgoingMessages.id, claimed.id), eq(outgoingMessages.state, 'sending'), eq(outgoingMessages.attemptedAt, claimed.attemptedAt),
       gt(outgoingMessages.leaseUntil, now))).returning({ id: outgoingMessages.id })
   if (!held) return null
+  // Where only notifications bring messages (WhatsApp), the person's newest one is marked as read once the answer is accepted.
+  const [newest] = webhookOnly(context, channel) ? await context.db.select({ externalId: directMessages.externalId }).from(directMessages)
+    .where(and(eq(directMessages.conversationId, conversation.id), eq(directMessages.direction, 'in'))).orderBy(desc(directMessages.sentAt)).limit(1) : []
   return adapter.sendMessage(driver.app, { channel: channelTarget(channel), token: driver.token, recipientExternalId: conversation.participantExternalId,
-    text: message.text })
+    text: message.text, outgoingId: message.id, ...(newest ? { readExternalId: newest.externalId } : {}) })
+}
+
+/** Whether a channel's conversations come only from notifications, never read back (WhatsApp). */
+function webhookOnly(context: EngineContext, channel: Pick<typeof channels.$inferSelect, 'platform' | 'kind'>) {
+  return context.adapters.get(channel.platform)?.messageRules?.(channel.kind)?.inbound === 'webhook'
+}
+
+/**
+ * Where the platform's conversation cannot be read back (WhatsApp), a sent
+ * message is stored in the conversation by the engine itself, as the sync
+ * stores the brand's messages elsewhere, so the thread and the answering
+ * step see it. Once per platform ID.
+ */
+async function recordOwnMessage(context: EngineContext, executor: Executor, message: Outgoing, platformMessageId: string, at: Date) {
+  const [channel] = await executor.select({ platform: channels.platform, kind: channels.kind }).from(channels).where(eq(channels.id, message.channelId)).limit(1)
+  if (!channel || !webhookOnly(context, channel)) return
+  const inserted = await executor.insert(directMessages).values({ organizationId: message.organizationId, channelId: message.channelId,
+    conversationId: message.conversationId, externalId: platformMessageId, direction: 'out', text: message.text, attachments: [], sentAt: at, firstSeenAt: at })
+    .onConflictDoNothing({ target: [directMessages.channelId, directMessages.externalId] }).returning({ id: directMessages.id })
+  if (inserted.length) {
+    await executor.update(conversations).set({ lastMessageAt: sql`greatest(${conversations.lastMessageAt}, ${at}::timestamptz)`, updatedAt: at })
+      .where(eq(conversations.id, message.conversationId))
+  }
 }
 
 /** A confirmed message settles the record even when it arrives late: after the sweeper, after a person's `not_sent` (kept), or a person's `sent` (ID recorded). */
@@ -435,7 +491,7 @@ export async function settleMessage(context: EngineContext, claimed: ClaimedMess
     }
     let values: Partial<typeof outgoingMessages.$inferInsert>
     if (outcome.kind === 'sent') {
-      values = { state: 'sent', platformMessageId: outcome.externalId, errorCode: null, reconciling: false, settledBy: 'worker', settledAt: now }
+      values = { state: 'sent', platformMessageId: outcome.externalId, errorCode: null, errorDetail: null, reconciling: false, settledBy: 'worker', settledAt: now }
       if (!await settleSent(transaction, message.id, { ...values, leaseUntil: null, updatedAt: now })) {
         // Another message holds this platform ID: a person decides.
         if (message.state === 'sending') {
@@ -448,13 +504,15 @@ export async function settleMessage(context: EngineContext, claimed: ClaimedMess
       if (message.resolution === 'not_sent') {
         await recordEvent(transaction, { ...base, kind: 'message.resolution_overridden', detail: { resolution: 'not_sent', settledBy: 'worker' } })
       }
+      await recordOwnMessage(context, transaction, message, outcome.externalId, now)
     } else if (outcome.kind === 'uncertain') {
-      values = { state: 'uncertain', errorCode: outcome.code, reconciling: true, reconcileCount: 0, reconcileMisses: 0,
+      values = { state: 'uncertain', errorCode: outcome.code, errorDetail: safeErrorDetail(outcome.detail), reconciling: true, reconcileCount: 0, reconcileMisses: 0,
         notBefore: new Date(Math.max(now.getTime(), claimed.attemptedAt.getTime() + messageReconcileDelaysMs[0]!)) }
     } else if (outcome.retryable && message.attemptCount < maxMessageAttempts && now.getTime() - message.sendAt.getTime() < maxMessageLatenessMs) {
-      values = { state: 'queued', errorCode: outcome.code, notBefore: new Date(now.getTime() + sendRetryDelayMs(message.attemptCount)) }
+      values = { state: 'queued', errorCode: outcome.code, errorDetail: safeErrorDetail(outcome.detail),
+        notBefore: new Date(now.getTime() + sendRetryDelayMs(message.attemptCount)) }
     } else {
-      values = { state: 'failed', errorCode: outcome.code, permission: outcome.permission ?? null, settledAt: now }
+      values = { state: 'failed', errorCode: outcome.code, errorDetail: safeErrorDetail(outcome.detail), permission: outcome.permission ?? null, settledAt: now }
     }
     if (outcome.kind !== 'sent') await transaction.update(outgoingMessages).set({ ...values, leaseUntil: null, updatedAt: now }).where(eq(outgoingMessages.id, message.id))
     if (outcome.kind === 'failed' && outcome.permission) {
@@ -473,7 +531,7 @@ export async function settleMessage(context: EngineContext, claimed: ClaimedMess
         .where(eq(conversationChecks.channelId, message.channelId))
     }
     await recordEvent(transaction, { ...base, kind: `message.${values.state}`,
-      detail: outcome.kind === 'sent' ? { platformMessageId: outcome.externalId } : { code: outcome.code } })
+      detail: outcome.kind === 'sent' ? { platformMessageId: outcome.externalId } : { code: outcome.code, detail: safeErrorDetail(outcome.detail) } })
     // A message a person already said was sent is not announced twice.
     if ((values.state === 'sent' || values.state === 'failed') && message.state !== values.state) await emitMessageOutcome(transaction, message.id, now)
     else if (values.state === 'uncertain') await queueControlEvent(transaction, 'messages.changed', message.organizationId, now)
@@ -541,14 +599,20 @@ export async function reconcileDueMessages(context: EngineContext, budget?: Call
       .where(and(eq(outgoingMessages.id, message.id), lookingFor, eq(outgoingMessages.reconcileCount, message.reconcileCount))).returning({ id: outgoingMessages.id })
     if (!claimed) continue
     try {
-      const adapter = adapterFor(context, channel.platform)
-      if (!adapter.findMessage) throw new Error('Messages cannot be looked up on this channel')
-      const driver = await channelDriver(context, context.db, channel)
-      const others = await context.db.select({ id: outgoingMessages.platformMessageId }).from(outgoingMessages)
-        .where(and(eq(outgoingMessages.channelId, channel.id), ne(outgoingMessages.id, message.id), isNotNull(outgoingMessages.platformMessageId)))
-      const result = await adapter.findMessage(driver.app, { channel: channelTarget(channel), token: driver.token, conversationExternalId: conversation.externalId,
-        text: message.text, since: new Date(attempted - messageReconcileSkewMs), excludeExternalIds: others.flatMap(row => row.id ? [row.id] : []) })
-      if (await recordLook(context, message, result, nextDelay === undefined)) found++
+      let result: FindReplyOutcome
+      if (message.reportedMessageId) {
+        // A status report named this message (WhatsApp echoes the engine's outgoing ID): no need to read the platform.
+        result = { kind: 'found', externalId: message.reportedMessageId }
+      } else {
+        const adapter = adapterFor(context, channel.platform)
+        if (!adapter.findMessage) throw new Error('Messages cannot be looked up on this channel')
+        const driver = await channelDriver(context, context.db, channel)
+        const others = await context.db.select({ id: outgoingMessages.platformMessageId }).from(outgoingMessages)
+          .where(and(eq(outgoingMessages.channelId, channel.id), ne(outgoingMessages.id, message.id), isNotNull(outgoingMessages.platformMessageId)))
+        result = await adapter.findMessage(driver.app, { channel: channelTarget(channel), token: driver.token, conversationExternalId: conversation.externalId,
+          text: message.text, since: new Date(attempted - messageReconcileSkewMs), excludeExternalIds: others.flatMap(row => row.id ? [row.id] : []) })
+      }
+      if (await recordLook(context, message, result, nextDelay === undefined, Boolean(message.reportedMessageId))) found++
     } catch (error) {
       if (error instanceof RateLimited) {
         // A rate limit is not a check: look again in an hour.
@@ -564,14 +628,15 @@ export async function reconcileDueMessages(context: EngineContext, budget?: Call
 }
 
 /** Records one look under the message's row lock, which says whether the match was taken meanwhile or a rival may own it. True when settled as sent. */
-async function recordLook(context: EngineContext, looked: Outgoing, result: FindReplyOutcome, last: boolean) {
+async function recordLook(context: EngineContext, looked: Outgoing, result: FindReplyOutcome, last: boolean, reported = false) {
   return context.db.transaction(async transaction => {
     const at = clock(context)
     const [message] = await transaction.select().from(outgoingMessages).where(and(eq(outgoingMessages.id, looked.id), lookingFor)).for('update').limit(1)
     if (!message) return false
     const base = { organizationId: message.organizationId, channelId: message.channelId }
     let outcome = result
-    if (outcome.kind === 'found') {
+    // A report that names this very message by its outgoing ID has no rival: only text matches can be confused.
+    if (outcome.kind === 'found' && !reported) {
       const rival = await rivalFor(transaction, message)
       if (rival) {
         outcome = { kind: 'ambiguous', detail: 'Another message with the same text in this conversation may own the match' }
@@ -582,6 +647,7 @@ async function recordLook(context: EngineContext, looked: Outgoing, result: Find
       reconciling: false, settledBy: 'reconcile', settledAt: at, updatedAt: at })) {
       await recordEvent(transaction, { ...base, kind: 'message.reconciled.sent',
         detail: { platformMessageId: outcome.externalId, ...(message.resolution === 'not_sent' ? { overrides: 'resolved_not_sent' } : {}) } })
+      await recordOwnMessage(context, transaction, message, outcome.externalId, at)
       if (message.state !== 'sent') await emitMessageOutcome(transaction, message.id, at)
       return true
     }
@@ -607,7 +673,8 @@ export async function runMessages(context: EngineContext, budget?: CallBudget) {
     const claimed = await claimNextMessage(context)
     if (!claimed) break
     const outcome = await executeMessage(context, claimed)
-    log('info', 'message attempt finished', { outgoingMessageId: claimed.id, outcome: outcome.kind, ...(outcome.kind === 'sent' ? {} : { code: outcome.code }) })
+    log(outcome.kind === 'sent' ? 'info' : 'warn', 'message attempt finished', { outgoingMessageId: claimed.id, outcome: outcome.kind,
+      ...(outcome.kind === 'sent' ? {} : { code: outcome.code, detail: safeErrorDetail(outcome.detail) }) })
     sent++
   }
   const reconciled = await reconcileDueMessages(context, budget)

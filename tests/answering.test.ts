@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildDecisionRequest, caseMatches, decide, DecisionError, LiquidDecisionModel, type DecisionItem, type DecisionModel } from '../src/answering/decision.js'
-import { AnthropicDraftModel, attr, buildDraftPrompt, draftFits, draftLimits, DraftError, type DraftInput } from '../src/answering/drafting.js'
+import { AnthropicDraftModel, attr, buildDraftPrompt, commentStyle, directMessageStyle, draftFits, registerRule, draftLimits, DraftError, type DraftInput } from '../src/answering/drafting.js'
 import { draftObjection } from '../src/answering/pipeline.js'
 import { answeringPutSchema, answeringSettingsSchema } from '../src/answering/settings.js'
 import { reviseSchema } from '../src/answering/revise.js'
@@ -201,6 +201,43 @@ describe('draft prompt', () => {
     expect(revised.user).toContain('<instruction>\nShorter, please\n</instruction>')
     expect(revised.system).toMatch(/only instruction you follow/)
     expect(buildDraftPrompt({ ...draftBase, history: [], revise: { current: null, instruction: 'Write one' } }).user).toContain('(none: write the first draft)')
+  })
+
+  it('gives direct messages the short, direct chat style, and comments their own', () => {
+    const comment = { ...draftBase, kind: 'comment' as const, post: 'Caption', thread: [], comment: { author: 'a', text: 'Nice', publishedAt: new Date(0) } }
+    for (const platform of ['meta', 'instagram', 'whatsapp']) {
+      const { system } = buildDraftPrompt({ ...draftBase, channel: { name: 'Example Shop', platform }, history: [] })
+      for (const rule of directMessageStyle) expect(system).toContain(rule)
+      for (const rule of commentStyle.filter(rule => rule !== registerRule)) expect(system).not.toContain(rule)
+      expect(system).toMatch(/Answer first/)
+      expect(system).toMatch(/1 to 3 short sentences/)
+      expect(system).toMatch(/No greeting and no sign-off, unless the person opened with a greeting/)
+      expect(system).toMatch(/No marketing filler/)
+      expect(system).toMatch(/do not restate their question/)
+      expect(system).toMatch(/Plain text only: no markdown/)
+      expect(system).toMatch(/one clear next step/)
+      expect(system).toContain(registerRule)
+    }
+    const { system } = buildDraftPrompt(comment)
+    for (const rule of commentStyle) expect(system).toContain(rule)
+    for (const rule of directMessageStyle.filter(rule => rule !== registerRule)) expect(system).not.toContain(rule)
+    expect(system).not.toMatch(/Answer first|1 to 3 short sentences|Plain text only/)
+    // One form of address applies to comments too.
+    expect(system).toContain(registerRule)
+  })
+
+  it('keeps one form of address, the person\'s, in messages and comments alike', () => {
+    expect(registerRule).toMatch(/one form of address throughout/)
+    expect(registerRule).toMatch(/tu, Lei or voi/)
+    expect(registerRule).toMatch(/never switch/)
+    const message = buildDraftPrompt({ ...draftBase, history: [] }).system
+    const comment = buildDraftPrompt({ ...draftBase, kind: 'comment', post: '', thread: [], comment: { author: 'a', text: 'Ciao', publishedAt: new Date(0) } }).system
+    for (const system of [message, comment]) expect(system.split(registerRule)).toHaveLength(2)
+  })
+
+  it('keeps the chat style on a revision a person asks for', () => {
+    const { system } = buildDraftPrompt({ ...draftBase, history: [], revise: { current: 'Old', instruction: 'Mention the hours' } })
+    for (const rule of directMessageStyle) expect(system).toContain(rule)
   })
 
   it('counts the channel limit in its unit', () => {

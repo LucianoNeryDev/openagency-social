@@ -7,10 +7,11 @@ const updatedAt = () => timestamp('updated_at', { withTimezone: true }).notNull(
 
 // `instagram` is Instagram's own login (accounts without a Facebook Page); `meta` covers Pages and the Instagram accounts linked to them.
 // `tiktok`, `x`, `linkedin`, `threads`, `pinterest` and `reddit` are driven through the browser runner.
-export const platforms = ['meta', 'tiktok', 'youtube', 'instagram', 'x', 'linkedin', 'threads', 'pinterest', 'reddit'] as const
+// `whatsapp` is the WhatsApp Business Platform (Cloud API), connected through a Meta app of its own record.
+export const platforms = ['meta', 'tiktok', 'youtube', 'instagram', 'x', 'linkedin', 'threads', 'pinterest', 'reddit', 'whatsapp'] as const
 export type Platform = typeof platforms[number]
 export const channelKinds = ['facebook_page', 'instagram_account', 'tiktok_account', 'youtube_channel', 'x_account',
-  'linkedin_profile', 'linkedin_page', 'threads_account', 'pinterest_account', 'reddit_account'] as const
+  'linkedin_profile', 'linkedin_page', 'threads_account', 'pinterest_account', 'reddit_account', 'whatsapp_number'] as const
 export type ChannelKind = typeof channelKinds[number]
 export const channelStatuses = ['active', 'needs_reauth', 'disabled'] as const
 export type ChannelStatus = typeof channelStatuses[number]
@@ -59,6 +60,8 @@ export const channels = pgTable('channels', {
   kind: text('kind').$type<ChannelKind>().notNull(),
   externalId: text('external_id').notNull(),
   name: text('name').notNull(),
+  // The platform account the channel belongs to, where it has one: a WhatsApp number's business account (WABA).
+  parentExternalId: text('parent_external_id'),
   status: text('status').$type<ChannelStatus>().notNull().default('active'),
   // Permissions the grant holds, as the platform reported them at connect or
   // renewal; null when unknown (imported, or connected before they were read).
@@ -483,11 +486,11 @@ export const conversationChecks = pgTable('conversation_checks', {
   index('conversation_checks_organization').on(table.organizationId),
 ])
 
-export const messagingPlatforms = ['messenger', 'instagram'] as const
+export const messagingPlatforms = ['messenger', 'instagram', 'whatsapp'] as const
 export type MessagingPlatform = typeof messagingPlatforms[number]
 
 /**
- * A Messenger or Instagram conversation between a channel and one person.
+ * A Messenger, Instagram or WhatsApp conversation between a channel and one person.
  * The participant's platform ID is kept because answering needs it; their
  * name and username only to show. Third-party personal data: deleted 180
  * days after the last message, or with the channel.
@@ -498,7 +501,8 @@ export const conversations = pgTable('conversations', {
   channelId: uuid('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
   platform: text('platform').$type<MessagingPlatform>().notNull(),
   externalId: text('external_id').notNull(),
-  // PSID on Messenger, IGSID on Instagram; null when the platform listed no other participant.
+  // PSID on Messenger, IGSID on Instagram; on WhatsApp the phone number (wa_id) when Meta gives it, else the
+  // business-scoped user ID. Null when the platform listed no other participant.
   participantExternalId: text('participant_external_id'),
   participantName: text('participant_name'),
   participantUsername: text('participant_username'),
@@ -520,9 +524,15 @@ export const conversations = pgTable('conversations', {
 ])
 
 export interface MessageAttachment {
-  /** `image`, `video`, `audio`, `file`, `sticker`, `share`, `story` or `other`. */
+  /**
+   * `image`, `video`, `audio`, `file`, `sticker`, `share`, `story` or `other`; on WhatsApp also
+   * `location`, `contacts`, `reaction`, `interactive`, `button`, `order` and `unsupported`.
+   */
   type: string
   name?: string
+  /** WhatsApp only: Meta's media ID, read on request (it expires there after about 30 days). Never a URL. */
+  mediaId?: string
+  mimeType?: string
 }
 
 /** One message of a conversation, either way. Attachments keep their type and name only, never their URLs. */
@@ -551,6 +561,8 @@ export const directMessages = pgTable('direct_messages', {
 
 export const outgoingMessageStates = ['queued', 'sending', 'sent', 'failed', 'uncertain', 'cancelled'] as const
 export type OutgoingMessageState = typeof outgoingMessageStates[number]
+export const deliveryStatuses = ['sent', 'delivered', 'read', 'failed'] as const
+export type DeliveryStatus = typeof deliveryStatuses[number]
 
 /**
  * One submitted message revision from the dashboard, sent at most once
@@ -588,15 +600,25 @@ export const outgoingMessages = pgTable('outgoing_messages', {
   reconcileMisses: integer('reconcile_misses').notNull().default(0),
   resolution: text('resolution').$type<'sent' | 'not_sent'>(),
   errorCode: text('error_code'),
+  // The platform's own code and a short message, with personal details removed (safeErrorDetail).
+  errorDetail: text('error_detail'),
   // The permission a `missing_permission` failure names.
   permission: text('permission'),
   platformMessageId: text('platform_message_id'),
   settledBy: text('settled_by').$type<'worker' | 'reconcile' | 'operator'>(),
   settledAt: timestamp('settled_at', { withTimezone: true }),
+  // Where the platform reports it got to after the send (WhatsApp statuses): sent, delivered, read, or failed with a code.
+  deliveryStatus: text('delivery_status').$type<DeliveryStatus>(),
+  deliveryErrorCode: text('delivery_error_code'),
+  deliveryUpdatedAt: timestamp('delivery_updated_at', { withTimezone: true }),
+  // The platform's ID for this message as a status report named it, which settles an uncertain send without reading the conversation.
+  reportedMessageId: text('reported_message_id'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, table => [
   check('outgoing_messages_state', oneOf('state', outgoingMessageStates)),
+  check('outgoing_messages_error_detail', sql`error_detail is null or char_length(error_detail) <= 300`),
+  check('outgoing_messages_delivery_status', sql`delivery_status is null or delivery_status in ('sent', 'delivered', 'read', 'failed')`),
   check('outgoing_messages_revision', sql`revision > 0`),
   check('outgoing_messages_hashes', sql`request_key ~ '^[0-9a-f]{64}$' and digest ~ '^[0-9a-f]{64}$'`),
   check('outgoing_messages_text_length', sql`char_length(text) between 1 and 5000`),
