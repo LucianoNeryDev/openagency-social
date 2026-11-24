@@ -600,6 +600,8 @@ export const outgoingMessages = pgTable('outgoing_messages', {
   reconcileMisses: integer('reconcile_misses').notNull().default(0),
   resolution: text('resolution').$type<'sent' | 'not_sent'>(),
   errorCode: text('error_code'),
+  // The platform's own code and a short message, with personal details removed (safeErrorDetail).
+  errorDetail: text('error_detail'),
   // The permission a `missing_permission` failure names.
   permission: text('permission'),
   platformMessageId: text('platform_message_id'),
@@ -615,6 +617,7 @@ export const outgoingMessages = pgTable('outgoing_messages', {
   updatedAt: updatedAt(),
 }, table => [
   check('outgoing_messages_state', oneOf('state', outgoingMessageStates)),
+  check('outgoing_messages_error_detail', sql`error_detail is null or char_length(error_detail) <= 300`),
   check('outgoing_messages_delivery_status', sql`delivery_status is null or delivery_status in ('sent', 'delivered', 'read', 'failed')`),
   check('outgoing_messages_revision', sql`revision > 0`),
   check('outgoing_messages_hashes', sql`request_key ~ '^[0-9a-f]{64}$' and digest ~ '^[0-9a-f]{64}$'`),

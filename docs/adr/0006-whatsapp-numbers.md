@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-11-24
+- Amended 2026-11-24 after the staging test: the configuration must issue a
+  user access token, and every connect fails on a refused subscription.
 
 ## Context
 
@@ -37,14 +39,22 @@ conversations itself.
   Login for Business configuration), and connect through the same callback.
   The number's WABA is kept on the channel (`parent_external_id`).
 - **Connecting.** Facebook Login for Business with
-  `whatsapp_business_management` and `whatsapp_business_messaging` (a
-  configuration that issues a system-user token is recommended: it does not
-  expire). The grant's `whatsapp_business_management` targets name the WABAs;
-  each of their numbers becomes a channel, and the app is subscribed to each
-  WABA (`POST /{waba-id}/subscribed_apps`). An operator may instead connect
-  one number with a token they hold (`POST /v1/tenants/:org/whatsapp/numbers`),
-  checked against Meta before it is sealed like every other credential; there
-  a refused subscription fails the connect.
+  `whatsapp_business_management` and `whatsapp_business_messaging`, through a
+  configuration whose token type is **user access token**. One that issues a
+  system-user token cannot cover a WABA: the dialog offers no WhatsApp
+  account to pick and the grant's targets come back empty (found on
+  staging). The user token is exchanged for a long-lived one, which lasts
+  about 60 days; the number is then connected again. The grant's
+  `whatsapp_business_management` targets name the WABAs; each of their
+  numbers becomes a channel, and the app is subscribed to each WABA (`POST
+  /{waba-id}/subscribed_apps`). No WABA granted (`no_whatsapp_account`), none
+  with a number (`no_whatsapp_number`) or a refused subscription
+  (`whatsapp_subscription_failed`, with Meta's code) fails the connect with
+  that code, since no message would ever arrive. An operator may instead
+  connect one number with a token they hold (`POST
+  /v1/tenants/:org/whatsapp/numbers`), a system user's that does not
+  expire, checked against Meta before it is sealed like every other
+  credential, under the same subscription rule.
 - **Inbound content is trusted only under Meta's signature.** The control
   plane's public Meta webhook receiver forwards a WhatsApp notification as it
   came, with its `X-Hub-Signature-256` header, to `POST

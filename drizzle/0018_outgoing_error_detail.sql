@@ -1,0 +1,2 @@
+ALTER TABLE "outgoing_messages" ADD COLUMN "error_detail" text;--> statement-breakpoint
+ALTER TABLE "outgoing_messages" ADD CONSTRAINT "outgoing_messages_error_detail" CHECK (error_detail is null or char_length(error_detail) <= 300);

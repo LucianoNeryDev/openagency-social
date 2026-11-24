@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
+import { safeErrorDetail } from '../src/messages.js'
 import { GraphError } from '../src/platforms/meta/graph.js'
 import { classifyWhatsAppSend, numberName, recipientField, WhatsAppAdapter } from '../src/platforms/whatsapp/adapter.js'
 import { parseWhatsAppNotification, verifyWhatsAppSignature, whatsappErrorCode } from '../src/platforms/whatsapp/webhook.js'
@@ -206,6 +207,16 @@ describe('WhatsApp sends', () => {
     expect(classifyWhatsAppSend(new GraphError({ kind: 'lost' }, 'lost'))).toMatchObject({ kind: 'uncertain', code: 'response_lost' })
   })
 
+  it('keeps Meta\'s code, subcode and message in the detail of a refusal, and maps the account and payment errors', async () => {
+    const outcome = async (reply: Reply) => whatsapp([reply]).adapter.sendMessage(app, sendInput())
+    expect(await outcome(json({ error: { message: 'Re-engagement message', code: 131047, error_subcode: 2494010 } }, 400)))
+      .toMatchObject({ code: 'outside_window', detail: 'Meta 131047/2494010 (HTTP 400): Re-engagement message' })
+    expect(await outcome(graphError(400, 133010, 'Account not registered'))).toMatchObject({ kind: 'failed', retryable: false, code: 'account_not_registered' })
+    expect(await outcome(graphError(400, 131031, 'Account has been locked'))).toMatchObject({ kind: 'failed', retryable: false, code: 'account_locked' })
+    expect(await outcome(graphError(400, 368, 'Temporarily blocked for policies violations'))).toMatchObject({ code: 'account_locked' })
+    expect(await outcome(graphError(400, 131042, 'Business eligibility payment issue'))).toMatchObject({ kind: 'failed', retryable: false, code: 'payment_required' })
+  })
+
   it('names the failure codes a status report carries', () => {
     expect(whatsappErrorCode(131047)).toBe('outside_window')
     expect(whatsappErrorCode(131026)).toBe('recipient_unavailable')
@@ -213,6 +224,9 @@ describe('WhatsApp sends', () => {
     expect(whatsappErrorCode(130429)).toBe('rate_limited')
     expect(whatsappErrorCode(undefined)).toBe('rejected')
     expect(whatsappErrorCode(132001)).toBe('rejected')
+    expect(whatsappErrorCode(133010)).toBe('account_not_registered')
+    expect(whatsappErrorCode(131031)).toBe('account_locked')
+    expect(whatsappErrorCode(131042)).toBe('payment_required')
   })
 
   it('cannot read a conversation back, so a look finds nothing; nothing is published to a number', async () => {
@@ -258,9 +272,31 @@ describe('WhatsApp connect', () => {
 
   it('exchanges a short-lived user token for a long-lived one', async () => {
     const { calls, adapter } = whatsapp([json({ access_token: 'short', expires_in: 3_600 }), json({ access_token: 'long', expires_in: 5_184_000 }),
-      json({ data: { scopes: [] } })])
-    expect(await adapter.finishConnect(app, 'code-1')).toEqual([])
+      json({ data: { scopes: ['whatsapp_business_management'], granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['102290129340398'] }] } }),
+      json({ data: [{ id: '106540352242922' }] }), json({ success: true })])
+    const [account] = await adapter.finishConnect(app, 'code-1')
     expect(calls[1]!.url.searchParams.get('grant_type')).toBe('fb_exchange_token')
+    expect(account).toMatchObject({ token: 'long', tokenExpiresAt: expect.any(Date) })
+  })
+
+  it('says so when the grant covers no WhatsApp account, as with a system-user token configuration', async () => {
+    const noTargets = whatsapp([json({ access_token: 'system-user-token' }), json({ data: { scopes: ['whatsapp_business_management', 'whatsapp_business_messaging'],
+      granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: [] }] } })])
+    await expect(noTargets.adapter.finishConnect(app, 'code-1')).rejects.toMatchObject({ status: 400, code: 'no_whatsapp_account',
+      message: expect.stringMatching(/user access token/) })
+    expect(noTargets.calls).toHaveLength(2)
+    const noNumbers = whatsapp([json({ access_token: 't' }), json({ data: { granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['102290129340398'] }] } }),
+      json({ data: [] })])
+    await expect(noNumbers.adapter.finishConnect(app, 'code-1')).rejects.toMatchObject({ code: 'no_whatsapp_number' })
+  })
+
+  it('fails the connect when Meta refuses the webhook subscription, naming its code', async () => {
+    const { calls, adapter } = whatsapp([json({ access_token: 't' }),
+      json({ data: { granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['102290129340398'] }] } }),
+      json({ data: [{ id: '106540352242922' }] }), graphError(403, 200, 'Permissions error')])
+    await expect(adapter.finishConnect(app, 'code-1')).rejects.toMatchObject({ status: 409, code: 'whatsapp_subscription_failed',
+      detail: { businessAccountId: '102290129340398', metaCode: 200 } })
+    expect(calls.at(-1)!.url.pathname).toBe('/v26.0/102290129340398/subscribed_apps')
   })
 
   it('connects a number by hand only when it is in the business account, and fails when the subscription is refused', async () => {
@@ -272,7 +308,7 @@ describe('WhatsApp connect', () => {
     await expect(whatsapp([numbers]).adapter.connectNumber(app, { token: 't'.repeat(20), businessAccountId: '102290129340398', phoneNumberId: '999' }))
       .rejects.toMatchObject({ code: 'number_not_in_account' })
     await expect(whatsapp([numbers, graphError(403, 200, 'Permissions error')]).adapter.connectNumber(app, { token: 't'.repeat(20),
-      businessAccountId: '102290129340398', phoneNumberId: '106540352242922' })).rejects.toBeInstanceOf(GraphError)
+      businessAccountId: '102290129340398', phoneNumberId: '106540352242922' })).rejects.toMatchObject({ code: 'whatsapp_subscription_failed', detail: { metaCode: 200 } })
     expect(numberName({ id: '1', verified_name: 'x'.repeat(300) })).toHaveLength(200)
   })
 })
@@ -304,5 +340,17 @@ describe('WhatsApp media', () => {
     const result = await adapter.downloadMedia(app, input)
     if (result.kind !== 'ok') throw new Error('expected a stream')
     await expect(read(result.body)).rejects.toThrow()
+  })
+})
+
+describe('stored error details', () => {
+  it('keep the platform\'s codes and drop phone numbers, emails and links', () => {
+    expect(safeErrorDetail('Meta 131047/2494010 (HTTP 400): Re-engagement message')).toBe('Meta 131047/2494010 (HTTP 400): Re-engagement message')
+    expect(safeErrorDetail('Meta 131030 (HTTP 400): Recipient +39 340 123 4567 not in allowed list'))
+      .toBe('Meta 131030 (HTTP 400): Recipient [number] not in allowed list')
+    expect(safeErrorDetail('Recipient 393401234567 at mario.rossi@example.com, see https://example.com/x?id=1')).toBe('Recipient [number] at [email], see [link]')
+    expect(safeErrorDetail('x'.repeat(400))).toHaveLength(300)
+    expect(safeErrorDetail('  ')).toBeNull()
+    expect(safeErrorDetail(undefined)).toBeNull()
   })
 })

@@ -265,7 +265,9 @@ describe.skipIf(!required)('WhatsApp on PostgreSQL 17', { timeout: 60_000 }, () 
     const { message } = await submitMessage(context, org, messageFor(conversation!.id))
     api.sendFails = { status: 400, code: 131047 }
     await runMessages(context)
-    expect(await outgoing(message.id!)).toMatchObject({ state: 'failed', errorCode: 'outside_window', attemptCount: 1 })
+    expect(await outgoing(message.id!)).toMatchObject({ state: 'failed', errorCode: 'outside_window', errorDetail: 'Meta 131047 (HTTP 400): refused', attemptCount: 1 })
+    const [view] = await listOutgoingMessages(context, org, { conversationId: conversation!.id, limit: 10 })
+    expect(view).toMatchObject({ errorCode: 'outside_window', errorDetail: 'Meta 131047 (HTTP 400): refused' })
     expect(api.sent).toHaveLength(1)
   })
 
