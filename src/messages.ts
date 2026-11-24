@@ -52,6 +52,25 @@ const reconcilesPerPass = 5
 
 export { messageDigest }
 
+/** The longest platform error detail kept with a message. */
+export const maxErrorDetailLength = 300
+
+/**
+ * A platform's error as it may be stored and logged: the platform's codes and
+ * a short message, with anything that looks like a phone number, an email
+ * address or a link replaced, so a person's details never reach the record.
+ */
+export function safeErrorDetail(detail: string | undefined) {
+  if (!detail) return null
+  const cleaned = detail.replace(/\s+/g, ' ')
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]')
+    .replace(/\bhttps?:\/\/\S+/gi, '[link]')
+    // Error codes (up to six digits, as in 131047 or 2494010 after a slash) stay; longer runs are numbers or IDs of people.
+    .replace(/\+?\d[\d ().-]{6,}\d/g, match => /^\d{1,7}$/.test(match) ? match : '[number]')
+    .trim()
+  return Array.from(cleaned).slice(0, maxErrorDetailLength).join('') || null
+}
+
 /** One key per (organization, dashboard message, revision, digest): a second submission of it is the same message. */
 export function messageRequestKey(organizationId: string, messageId: string, revision: number, digest: string) {
   return sha256Json(['social-message-send-v1', organizationId, messageId, revision, digest])
@@ -100,6 +119,8 @@ export interface OutgoingMessageView {
   draftId: string | null
   state: OutgoingMessageState
   errorCode: string | null
+  /** The platform's error code and a short message, without personal details (`safeErrorDetail`); null once sent. */
+  errorDetail: string | null
   permission: string | null
   platformMessageId: string | null
   /** Always null: Meta gives messages no permalink. Kept so the view mirrors a reply's. */
@@ -130,7 +151,7 @@ export function outgoingView(message: Outgoing, directMessageId: string | null =
   return {
     id: message.id, requestKey: message.requestKey, messageId: message.messageId, revision: message.revision, digest: message.digest,
     conversationId: message.conversationId, channelId: message.channelId, approvedVia: message.approvedVia, draftId: message.draftId, state: message.state,
-    errorCode: message.errorCode,
+    errorCode: message.errorCode, errorDetail: message.errorDetail ?? null,
     permission: message.permission ? permissionName(message.permission) : null, platformMessageId: message.platformMessageId, url: null, attemptCount: message.attemptCount,
     reconciling: message.reconciling, sendAt: message.sendAt.toISOString(), attemptedAt: message.attemptedAt?.toISOString() ?? null,
     settledAt: message.settledAt?.toISOString() ?? null, settledBy: message.settledBy ?? null, directMessageId, resolution: message.resolution ?? null,
@@ -144,7 +165,7 @@ function tombstoneView(row: typeof outgoingMessageCancellations.$inferSelect, in
   return {
     id: null, requestKey: row.requestKey, messageId: input?.messageId ?? null, revision: input?.revision ?? null, digest: input?.digest ?? null,
     conversationId: input?.conversationId ?? null, channelId: null, approvedVia: input ? input.approvedVia ?? 'person' : null, draftId: input?.draftId ?? null,
-    state: 'cancelled', errorCode: 'cancelled_before_submit', permission: null,
+    state: 'cancelled', errorCode: 'cancelled_before_submit', errorDetail: null, permission: null,
     platformMessageId: null, url: null, attemptCount: 0, reconciling: false, sendAt: input ? new Date(input.sendAt).toISOString() : null, attemptedAt: null,
     settledAt: at, settledBy: null, directMessageId: null, resolution: null, notSentAllowed: false, deliveryStatus: null, deliveryErrorCode: null,
     deliveryUpdatedAt: null, updatedAt: at,
@@ -470,7 +491,7 @@ export async function settleMessage(context: EngineContext, claimed: ClaimedMess
     }
     let values: Partial<typeof outgoingMessages.$inferInsert>
     if (outcome.kind === 'sent') {
-      values = { state: 'sent', platformMessageId: outcome.externalId, errorCode: null, reconciling: false, settledBy: 'worker', settledAt: now }
+      values = { state: 'sent', platformMessageId: outcome.externalId, errorCode: null, errorDetail: null, reconciling: false, settledBy: 'worker', settledAt: now }
       if (!await settleSent(transaction, message.id, { ...values, leaseUntil: null, updatedAt: now })) {
         // Another message holds this platform ID: a person decides.
         if (message.state === 'sending') {
@@ -485,12 +506,13 @@ export async function settleMessage(context: EngineContext, claimed: ClaimedMess
       }
       await recordOwnMessage(context, transaction, message, outcome.externalId, now)
     } else if (outcome.kind === 'uncertain') {
-      values = { state: 'uncertain', errorCode: outcome.code, reconciling: true, reconcileCount: 0, reconcileMisses: 0,
+      values = { state: 'uncertain', errorCode: outcome.code, errorDetail: safeErrorDetail(outcome.detail), reconciling: true, reconcileCount: 0, reconcileMisses: 0,
         notBefore: new Date(Math.max(now.getTime(), claimed.attemptedAt.getTime() + messageReconcileDelaysMs[0]!)) }
     } else if (outcome.retryable && message.attemptCount < maxMessageAttempts && now.getTime() - message.sendAt.getTime() < maxMessageLatenessMs) {
-      values = { state: 'queued', errorCode: outcome.code, notBefore: new Date(now.getTime() + sendRetryDelayMs(message.attemptCount)) }
+      values = { state: 'queued', errorCode: outcome.code, errorDetail: safeErrorDetail(outcome.detail),
+        notBefore: new Date(now.getTime() + sendRetryDelayMs(message.attemptCount)) }
     } else {
-      values = { state: 'failed', errorCode: outcome.code, permission: outcome.permission ?? null, settledAt: now }
+      values = { state: 'failed', errorCode: outcome.code, errorDetail: safeErrorDetail(outcome.detail), permission: outcome.permission ?? null, settledAt: now }
     }
     if (outcome.kind !== 'sent') await transaction.update(outgoingMessages).set({ ...values, leaseUntil: null, updatedAt: now }).where(eq(outgoingMessages.id, message.id))
     if (outcome.kind === 'failed' && outcome.permission) {
@@ -509,7 +531,7 @@ export async function settleMessage(context: EngineContext, claimed: ClaimedMess
         .where(eq(conversationChecks.channelId, message.channelId))
     }
     await recordEvent(transaction, { ...base, kind: `message.${values.state}`,
-      detail: outcome.kind === 'sent' ? { platformMessageId: outcome.externalId } : { code: outcome.code } })
+      detail: outcome.kind === 'sent' ? { platformMessageId: outcome.externalId } : { code: outcome.code, detail: safeErrorDetail(outcome.detail) } })
     // A message a person already said was sent is not announced twice.
     if ((values.state === 'sent' || values.state === 'failed') && message.state !== values.state) await emitMessageOutcome(transaction, message.id, now)
     else if (values.state === 'uncertain') await queueControlEvent(transaction, 'messages.changed', message.organizationId, now)
@@ -651,7 +673,8 @@ export async function runMessages(context: EngineContext, budget?: CallBudget) {
     const claimed = await claimNextMessage(context)
     if (!claimed) break
     const outcome = await executeMessage(context, claimed)
-    log('info', 'message attempt finished', { outgoingMessageId: claimed.id, outcome: outcome.kind, ...(outcome.kind === 'sent' ? {} : { code: outcome.code }) })
+    log(outcome.kind === 'sent' ? 'info' : 'warn', 'message attempt finished', { outgoingMessageId: claimed.id, outcome: outcome.kind,
+      ...(outcome.kind === 'sent' ? {} : { code: outcome.code, detail: safeErrorDetail(outcome.detail) }) })
     sent++
   }
   const reconciled = await reconcileDueMessages(context, budget)

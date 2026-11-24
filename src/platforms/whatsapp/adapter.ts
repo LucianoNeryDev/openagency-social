@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { ChannelKind } from '../../db/schema.js'
-import { invalid } from '../../errors.js'
+import { EngineError, invalid } from '../../errors.js'
 import { rateLimited } from '../meta/classify.js'
 import { GraphClient, GraphError, type GraphCall, type GraphOptions } from '../meta/graph.js'
 import type {
@@ -67,13 +67,16 @@ export function classifyWhatsAppSend(error: unknown): SendMessageOutcome {
   if (failure.kind === 'unreachable') return { kind: 'failed', retryable: true, code: 'unreachable', detail: error.message }
   if (failure.kind === 'lost') return { kind: 'uncertain', code: 'response_lost', detail: error.message }
   const code = failure.code ?? 0
-  const detail = `HTTP ${failure.status} code ${code}${failure.subcode ? `/${failure.subcode}` : ''}: ${failure.message}`
+  // Meta's codes first: they are what its documentation and support go by.
+  const detail = `Meta ${code}${failure.subcode ? `/${failure.subcode}` : ''} (HTTP ${failure.status}): ${failure.message}`
   if (code === 190 || code === 102) return { kind: 'failed', retryable: false, code: 'channel_inactive', detail, reauth: true }
   if (code === 131005 || ((code === 10 || (code >= 200 && code <= 299)) && failure.message.includes(whatsappMessagingScope))) {
     return { kind: 'failed', retryable: false, code: 'missing_permission', detail, permission: whatsappMessagingScope }
   }
   if (code === 130429 || code === 131056 || rateLimited(error)) return { kind: 'failed', retryable: true, code: 'rate_limited', detail }
-  if ([131047, 131026, 131021, 131049, 131050, 130472, 131048].includes(code)) return { kind: 'failed', retryable: false, code: whatsappErrorCode(code), detail }
+  if ([131047, 131026, 131021, 131049, 131050, 130472, 131048, 133010, 131031, 368, 131042].includes(code)) {
+    return { kind: 'failed', retryable: false, code: whatsappErrorCode(code), detail }
+  }
   if (code === 131000 || failure.transient || failure.status >= 500) return { kind: 'uncertain', code: 'platform_error', detail }
   return { kind: 'failed', retryable: false, code: 'rejected', detail }
 }
@@ -110,9 +113,13 @@ export class WhatsAppAdapter implements PlatformAdapter {
   /**
    * Exchanges the code, reads which business accounts the grant covers
    * (`whatsapp_business_management` targets), and makes each of their phone
-   * numbers a channel. A short-lived user token is exchanged for a
-   * long-lived one; a system-user token from a Login for Business
-   * configuration does not expire.
+   * numbers a channel, after subscribing the app to each account. The Login
+   * for Business configuration must issue a user access token: one that
+   * issues a system-user token offers no WhatsApp account to pick, and the
+   * targets come back empty. A short-lived user token is exchanged for a
+   * long-lived one (about 60 days). No account granted, an account without
+   * numbers, or a refused subscription fails the connect with a code that
+   * says which (no message would ever arrive otherwise).
    */
   async finishConnect(app: ResolvedProviderApp, code: string): Promise<ConnectedAccount[]> {
     const appCall: GraphCall = { appSecret: app.secret }
@@ -126,18 +133,26 @@ export class WhatsAppAdapter implements PlatformAdapter {
     }
     const debug = await this.debugToken(app, token.access_token)
     const businessAccounts = debug?.granular_scopes?.find(scope => scope.scope === 'whatsapp_business_management')?.target_ids ?? []
+    if (!businessAccounts.length) {
+      throw new EngineError(400, 'no_whatsapp_account', 'The grant covers no WhatsApp Business Account: the Login for Business configuration must issue a user access '
+        + 'token with whatsapp_business_management and whatsapp_business_messaging, and the person must pick a WhatsApp account and number in the dialog')
+    }
     const expiresAt = token.expires_in ? new Date(Date.now() + token.expires_in * 1_000) : null
     const accounts: ConnectedAccount[] = []
     for (const businessAccountId of [...new Set(businessAccounts)].slice(0, maxBusinessAccounts)) {
       const numbers = numbersSchema.parse(await this.graph.request('GET', `/${businessAccountId}/phone_numbers`, { token: token.access_token, appSecret: app.secret,
         query: { fields: 'id,display_phone_number,verified_name', limit: String(maxNumbersPerAccount) } }))
       if (!numbers.data.length) continue
-      await this.subscribe(app, token.access_token, businessAccountId).catch(() => undefined)
+      await this.subscribe(app, token.access_token, businessAccountId).catch((error: unknown) => {
+        throw new EngineError(409, 'whatsapp_subscription_failed', 'Meta refused to subscribe the app to the WhatsApp Business Account\'s webhooks; no message would arrive',
+          { businessAccountId, ...graphCodes(error) })
+      })
       for (const value of numbers.data) {
         accounts.push({ kind: 'whatsapp_number', externalId: value.id, name: numberName(value), token: token.access_token, tokenExpiresAt: expiresAt,
           parentExternalId: businessAccountId, ...(debug?.scopes ? { grantedScopes: debug.scopes } : {}) })
       }
     }
+    if (!accounts.length) throw new EngineError(400, 'no_whatsapp_number', 'The granted WhatsApp Business Accounts have no phone number')
     return accounts
   }
 
@@ -154,7 +169,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
       query: { fields: 'id,display_phone_number,verified_name', limit: String(maxNumbersPerAccount) } }))
     const number = numbers.data.find(value => value.id === input.phoneNumberId)
     if (!number) throw invalid('number_not_in_account', 'The phone number is not in this WhatsApp Business Account, or the token cannot see it')
-    await this.subscribe(app, input.token, input.businessAccountId)
+    await this.subscribe(app, input.token, input.businessAccountId).catch((error: unknown) => {
+      throw new EngineError(409, 'whatsapp_subscription_failed', 'Meta refused to subscribe the app to the WhatsApp Business Account\'s webhooks; no message would arrive',
+        { businessAccountId: input.businessAccountId, ...graphCodes(error) })
+    })
     const debug = await this.debugToken(app, input.token)
     return { kind: 'whatsapp_number', externalId: number.id, name: numberName(number), token: input.token, tokenExpiresAt: null,
       parentExternalId: input.businessAccountId, ...(debug?.scopes ? { grantedScopes: debug.scopes } : {}) }
@@ -261,6 +279,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
     const mimeType = (info.mime_type ?? response.headers.get('content-type') ?? 'application/octet-stream').split(';')[0]!.trim()
     return { kind: 'ok', mimeType, sizeBytes: Number.isFinite(length) ? length : declared, body: response.body.pipeThrough(byteLimit(input.maxBytes)) }
   }
+}
+
+/** Meta's error code and subcode of a failed Graph request, for an error detail; nothing else of it. */
+function graphCodes(error: unknown): { metaCode?: number, metaSubcode?: number } {
+  if (!(error instanceof GraphError) || error.failure.kind !== 'http') return {}
+  return { ...(error.failure.code !== undefined ? { metaCode: error.failure.code } : {}), ...(error.failure.subcode !== undefined ? { metaSubcode: error.failure.subcode } : {}) }
 }
 
 /** Errors the stream once more than `max` bytes went through, whatever the headers said. */

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- WhatsApp fixes from the staging test: a connect now fails with a code that
+  says why instead of connecting nothing silently: `no_whatsapp_account`
+  (the grant names no business account, as with a Login for Business
+  configuration that issues a system-user token: it must issue a user
+  access token), `no_whatsapp_number`, or `whatsapp_subscription_failed`
+  (Meta refused the webhook subscription; Meta's code in `detail`), on the
+  OAuth path as on the manual one. ADR 0006 and the deploy notes now say the
+  configuration must issue a user access token.
+- Outgoing messages keep `errorDetail`: the platform's code, subcode and a
+  short message with phone numbers, emails and links removed (migration
+  `0018`, a nullable column); failed attempts are logged at `warn` with it.
+  WhatsApp maps 133010 to `account_not_registered`, 131031 and 368 to
+  `account_locked` and 131042 to `payment_required`, for sends and failed
+  statuses.
+- Drafts keep one form of address throughout, the person's (tu, Lei or
+  voi), in direct messages and comments.
+
 - WhatsApp business numbers as message-only channels ([ADR
   0006](docs/adr/0006-whatsapp-numbers.md)): platform `whatsapp`, kind
   `whatsapp_number`, messaging platform `whatsapp`. Login for Business

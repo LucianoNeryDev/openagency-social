@@ -207,6 +207,13 @@ export function whatsappErrorCode(code: number | undefined) {
     case 130429:
     case 131056:
     case 131048: return 'rate_limited'
+    // The business phone number is not registered with the Cloud API.
+    case 133010: return 'account_not_registered'
+    // The business account is locked, restricted or banned for a policy violation.
+    case 131031:
+    case 368: return 'account_locked'
+    // No valid payment method, or a payment problem on the business account.
+    case 131042: return 'payment_required'
     default: return 'rejected'
   }
 }

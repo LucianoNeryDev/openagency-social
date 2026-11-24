@@ -97,8 +97,10 @@ pnpm provider-app --id meta-agency-whatsapp --platform whatsapp --external-app-i
 
 On Meta's side: add the WhatsApp product to the app; create a Login for
 Business configuration with the `whatsapp_business_management` and
-`whatsapp_business_messaging` permissions (preferably issuing a system-user
-token that does not expire); subscribe the app's webhook (the dashboard's
+`whatsapp_business_messaging` permissions whose token type is **user access
+token** (a configuration issuing a system-user token offers no WhatsApp
+account to pick, and the connect fails with `no_whatsapp_account`; the user
+token lasts about 60 days, then the number is connected again); subscribe the app's webhook (the dashboard's
 Meta receiver, the same callback URL and verify token as Messenger) to the
 `whatsapp_business_account` object's `messages` field; and get Advanced
 Access to both permissions (Business Verification and App Review) before
@@ -106,8 +108,11 @@ numbers of other businesses connect. The engine needs nothing new: the
 callback is `META_REDIRECT_URI`, and the receiver checks the signature with
 the app secret the dashboard holds, which must be this app's.
 
-An operator can also connect one number with a system user's token
-(`POST /v1/tenants/:org/whatsapp/numbers`, see [api.md](api.md#whatsapp)).
+An operator can also connect one number with a system user's token, which
+does not expire (`POST /v1/tenants/:org/whatsapp/numbers`, see
+[api.md](api.md#whatsapp)). A connect fails with `no_whatsapp_account`,
+`no_whatsapp_number` or `whatsapp_subscription_failed` (with Meta's code in
+`detail`) rather than leave a number that would receive nothing.
 
 ## Comment replies
 

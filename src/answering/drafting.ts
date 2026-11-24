@@ -55,11 +55,19 @@ export interface DraftInput {
 }
 
 /**
+ * One form of address from the first word to the last, the one the person
+ * used: a draft that says "confermarvi" and then "Ti faremo sapere" reads
+ * as careless. Comments and direct messages alike.
+ */
+export const registerRule = 'Keep one form of address throughout the reply, the one the person used: in Italian tu, Lei or voi (the same in other languages, such as tu or vous, du or Sie); when they used none, choose one and never switch, not even in a single verb or pronoun.'
+
+/**
  * How a comment reply reads: public, under a post, short and natural for
  * the platform.
  */
 export const commentStyle = [
   'Write as the brand, in its voice, short and natural for the platform, in the language the person wrote in; set language to its code (it, en, ...).',
+  registerRule,
 ]
 
 /**
@@ -72,6 +80,7 @@ export const directMessageStyle = [
   'Write as a person at the brand answering in a private chat, in the brand\'s voice, in the language the person wrote in; set language to its code (it, en, ...). The voice sets the tone; the rules below set the length and shape, even when the voice asks for more.',
   'Answer first: the first sentence gives the answer, or says plainly what happens next.',
   'Use 1 to 3 short sentences.',
+  registerRule,
   'No greeting and no sign-off, unless the person opened with a greeting that calls for one back; then a short one at most.',
   'No marketing filler, no thanking them for their message, and do not restate their question.',
   'Plain text only: no markdown, no lists, no headings, no bold.',

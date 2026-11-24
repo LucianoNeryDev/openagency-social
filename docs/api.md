@@ -363,7 +363,7 @@ requestKey = sha256(JSON.stringify(['social-message-send-v1', organizationId, me
 | `POST /v1/tenants/:org/messages/:requestKey/resolve` | `{outcome: 'sent' \| 'not_sent'}` for an `uncertain` message → `{message}`; as for replies (`409 not_uncertain`, `409 still_checking`). Sends nothing. |
 
 An outgoing message: `{id, requestKey, messageId, revision, digest,
-conversationId, channelId, approvedVia, draftId, state, errorCode, permission, platformMessageId,
+conversationId, channelId, approvedVia, draftId, state, errorCode, errorDetail, permission, platformMessageId,
 url, attemptCount, reconciling, sendAt, attemptedAt, settledAt, settledBy,
 directMessageId, resolution, notSentAllowed, deliveryStatus, deliveryErrorCode,
 deliveryUpdatedAt, updatedAt}`, the reply's view with the conversation in place
@@ -398,7 +398,11 @@ hours after the attempt, for one by the channel's own account with the same
 text. Failure codes include `outside_window`, `missing_permission`,
 `channel_inactive`, `recipient_unavailable` (the person cannot be reached),
 `recipient_unknown`, `message_not_allowed`, `rate_limited`, `too_late`,
-`rejected` and `resolved_not_sent`.
+`rejected` and `resolved_not_sent`; on WhatsApp also `account_not_registered`,
+`account_locked` and `payment_required`. `errorDetail` keeps the platform's
+own code and a short message (`Meta 131047/2494010 (HTTP 400): …`), with
+phone numbers, email addresses and links replaced, at most 300 characters;
+it is logged the same way, and null once a message is sent.
 
 ### WhatsApp
 
@@ -408,8 +412,13 @@ A WhatsApp channel is one business phone number (`platform: whatsapp`,
 0006](adr/0006-whatsapp-numbers.md)). It connects through a provider app of
 platform `whatsapp` (the same Meta app may also be registered for `meta`):
 Facebook Login for Business with `whatsapp_business_management` and
-`whatsapp_business_messaging` makes every number of the WABAs the grant
-covers a channel, and subscribes the app to each WABA. WhatsApp has no API
+`whatsapp_business_messaging`, through a configuration that issues a user
+access token, makes every number of the WABAs the grant covers a channel,
+and subscribes the app to each WABA. `POST /v1/connect/finish` then refuses
+with `400 no_whatsapp_account` (the grant names no WABA: a configuration
+issuing a system-user token, or no account picked in the dialog), `400
+no_whatsapp_number`, or `409 whatsapp_subscription_failed` (`detail:
+{businessAccountId, metaCode?, metaSubcode?}`), and connects nothing. WhatsApp has no API
 to read conversations: the engine knows only what the dashboard forwards.
 
 | Route | Purpose |
@@ -440,8 +449,10 @@ decides after the 15-minute look as elsewhere. Errors: 131047 is
 `outside_window`, 131026 `recipient_unavailable`, 131049 and 131050
 `message_not_allowed`, 130429 (throughput), 131056 (pair rate) and Meta's
 app limits `rate_limited` and tried again, 131048 (spam rate) `rate_limited`
-and not tried again, 131005 `missing_permission`, 131000 and 5xx
-`uncertain`.
+and not tried again, 131005 `missing_permission`, 133010
+`account_not_registered`, 131031 and 368 `account_locked`, 131042
+`payment_required`, 131000 and 5xx `uncertain`. Failed statuses use the
+same codes in `deliveryErrorCode`.
 
 ## AI answers
 
@@ -534,7 +545,9 @@ drafted in a chat style: the answer first, one to three short sentences, no
 greeting or sign-off unless the person opened with a greeting that calls for
 one, no filler or restated question, plain text, and one clear next step
 when there is one. The brand's voice sets the tone; the style sets the
-length. Comments keep the platform's usual short reply. An `auto` item must be drafted and the drafting model
+length. Comments keep the platform's usual short reply. Both keep one form
+of address throughout, the person's (tu, Lei or voi in Italian), never
+mixing them. An `auto` item must be drafted and the drafting model
 must agree: without a draft it becomes `review` (`no_draft`); when the model
 says no answer is needed or raises any flag, `review` (`flagged`); with a
 draft longer than the channel takes, `review` (`draft_too_long`, and the
