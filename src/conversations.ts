@@ -9,7 +9,7 @@ import {
 import { notFound } from './errors.js'
 import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
-import { RateLimited, type PlatformConversation, type PlatformMessage } from './platforms/types.js'
+import { RateLimited, type PlatformAdapter, type PlatformConversation, type PlatformMessage } from './platforms/types.js'
 import { decodeCursor, encodeCursor, responseRetryDelayMs } from './responses.js'
 import { messagesRetentionMs } from './retention.js'
 import { emitWebhookEvents } from './webhooks.js'
@@ -45,10 +45,11 @@ export function windowOpenUntil(lastInboundAt: Date | null) {
   return lastInboundAt ? new Date(lastInboundAt.getTime() + answerWindowMs) : null
 }
 
-/** Channels the configured adapters read conversations on: active OAuth channels of a kind with message rules. */
+/** Channels the configured adapters read conversations on: active OAuth channels of a kind with message rules that are read, not only notified (WhatsApp). */
 function messagingChannels(context: EngineContext): SQL | null {
+  const read = (rules: ReturnType<NonNullable<PlatformAdapter['messageRules']>>) => Boolean(rules && rules.inbound !== 'webhook')
   const pairs = [...context.adapters].flatMap(([platform, adapter]) => adapter.conversations && adapter.messageRules
-    ? channelKinds.filter(kind => adapter.messageRules!(kind)).map(kind => and(eq(channels.platform, platform), eq(channels.kind, kind))!) : [])
+    ? channelKinds.filter(kind => read(adapter.messageRules!(kind))).map(kind => and(eq(channels.platform, platform), eq(channels.kind, kind))!) : [])
   return pairs.length ? and(eq(channels.status, 'active'), sql`${channels.providerAppId} is not null`, or(...pairs))! : null
 }
 
@@ -294,8 +295,15 @@ export async function getConversation(context: EngineContext, organizationId: st
   return { conversation: conversationView(row, message ?? null) }
 }
 
+/** A WhatsApp participant's phone number, as `+<digits>`, when Meta gave it; null elsewhere. */
+export function participantPhone(row: Pick<typeof conversations.$inferSelect, 'platform' | 'participantExternalId'>) {
+  return row.platform === 'whatsapp' && row.participantExternalId && /^\d{5,20}$/.test(row.participantExternalId) ? `+${row.participantExternalId}` : null
+}
+
 function conversationView(row: typeof conversations.$inferSelect, message: { direction: 'in' | 'out', text: string, sentAt: Date } | null) {
-  return { id: row.id, channelId: row.channelId, platform: row.platform, participant: { name: row.participantName, username: row.participantUsername },
+  const phone = participantPhone(row)
+  return { id: row.id, channelId: row.channelId, platform: row.platform,
+    participant: { name: row.participantName, username: row.participantUsername, ...(phone ? { phone } : {}) },
     lastMessageAt: row.lastMessageAt.toISOString(), lastInboundAt: row.lastInboundAt?.toISOString() ?? null,
     windowOpenUntil: windowOpenUntil(row.lastInboundAt)?.toISOString() ?? null,
     lastMessage: message ? { direction: message.direction, text: message.text, sentAt: message.sentAt.toISOString() } : null }

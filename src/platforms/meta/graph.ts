@@ -15,6 +15,8 @@ export interface GraphCall {
   query?: Record<string, string>
   /** URL-encoded form, or multipart when it contains a Blob. */
   form?: Record<string, string | Blob>
+  /** A JSON body instead of a form (the WhatsApp Cloud API); the app secret proof then goes in the query. */
+  json?: unknown
   /** Instagram's token endpoints live outside the versioned path. */
   unversioned?: boolean
   /** Called just before the request is sent; the collectors count their calls with it. */
@@ -74,14 +76,18 @@ export class GraphClient {
     for (const [key, value] of Object.entries(call.query ?? {})) url.searchParams.set(key, value)
     const headers: Record<string, string> = { Accept: 'application/json' }
     const secrets: string[] = []
-    let body: FormData | URLSearchParams | undefined
+    let body: FormData | URLSearchParams | string | undefined
     if (call.token) {
       headers.Authorization = `Bearer ${call.token}`
       secrets.push(call.token)
     }
     if (call.appSecret) secrets.push(call.appSecret)
     const proof = call.token && call.appSecret ? appSecretProof(call.token, call.appSecret) : undefined
-    if (call.form || method !== 'GET') {
+    if (call.json !== undefined) {
+      headers['Content-Type'] = 'application/json'
+      body = JSON.stringify(call.json)
+      if (proof) url.searchParams.set('appsecret_proof', proof)
+    } else if (call.form || method !== 'GET') {
       const entries = Object.entries(call.form ?? {})
       if (entries.some(([, value]) => value instanceof Blob)) {
         const form = new FormData()

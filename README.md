@@ -27,6 +27,7 @@ control plane ── approved revision ──► engine ──► platform APIs 
 | Facebook Pages | Text, image and link posts | Account and posts | Read and reply | Messenger |
 | Instagram (through a Page or Instagram's own login) | Images, carousels, reels | Account and posts | Read and reply | Yes |
 | YouTube | Videos | Channel and videos | Read and reply | — |
+| WhatsApp business numbers (Cloud API) | — | — | — | Yes |
 | TikTok, X, LinkedIn (profiles and Pages), Threads, Pinterest, Reddit | Through the browser runner | — | — | — |
 
 Across all of them:

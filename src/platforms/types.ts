@@ -21,6 +21,8 @@ export interface ConnectedAccount {
   tokenExpiresAt: Date | null
   /** Permissions the platform says the grant holds for this account; absent when it does not say. */
   grantedScopes?: string[]
+  /** The platform account it belongs to: a WhatsApp number's business account (WABA). */
+  parentExternalId?: string
 }
 
 /** A channel's OAuth grant as stored, decrypted. */
@@ -312,6 +314,13 @@ export interface MessageRules {
   maxLength: number
   /** How `maxLength` counts: Instagram's limit is 1,000 UTF-8 bytes. */
   unit: 'characters' | 'bytes'
+  /**
+   * How inbound messages arrive: `read` from the platform's conversation API
+   * (the default), or `webhook` only, from the notifications the control
+   * plane forwards (WhatsApp has no conversation API). A `webhook` kind is
+   * never synced, and the engine records its own sends in the conversation.
+   */
+  inbound?: 'read' | 'webhook'
 }
 
 export interface ConversationsInput {
@@ -359,9 +368,13 @@ export interface PlatformMessage {
 export interface SendMessageInput {
   channel: ChannelTarget
   token: string
-  /** The participant's PSID or IGSID. */
+  /** The participant's PSID or IGSID; on WhatsApp their phone number (wa_id) or business-scoped user ID. */
   recipientExternalId: string
   text: string
+  /** The engine's outgoing message, for platforms that echo a tag in their status reports (WhatsApp's `biz_opaque_callback_data`). */
+  outgoingId?: string
+  /** The person's newest stored message, which a platform with read receipts marks as read once the answer is accepted. */
+  readExternalId?: string
 }
 
 export type SendMessageOutcome =
@@ -380,6 +393,20 @@ export interface FindMessageInput {
   /** Message IDs other outgoing messages of the channel already hold. */
   excludeExternalIds: string[]
 }
+
+export interface MediaDownloadInput {
+  channel: ChannelTarget
+  token: string
+  /** The platform's media ID from a stored attachment. */
+  mediaId: string
+  /** Larger files are refused before they are read. */
+  maxBytes: number
+}
+
+export type MediaDownloadResult =
+  | { kind: 'ok', mimeType: string, sizeBytes: number | null, body: ReadableStream<Uint8Array> }
+  /** Gone at the platform (expired or deleted), too large, or refused. */
+  | { kind: 'unavailable', reason: 'gone' | 'too_large' | 'refused' }
 
 export interface PlatformAdapter {
   readonly platform: Platform
@@ -417,6 +444,8 @@ export interface PlatformAdapter {
   sendMessage?(app: ResolvedProviderApp | null, input: SendMessageInput): Promise<SendMessageOutcome>
   /** Looks in the conversation for a message the channel's own account sent with this text, for an uncertain send. */
   findMessage?(app: ResolvedProviderApp | null, input: FindMessageInput): Promise<FindReplyOutcome>
+  /** Reads a received attachment's bytes by its media ID, where attachments keep one (WhatsApp). Reads only. */
+  downloadMedia?(app: ResolvedProviderApp | null, input: MediaDownloadInput): Promise<MediaDownloadResult>
   /**
    * Renews an expiring grant. Throws `ReauthRequired` when the platform
    * refuses it; any other error is transient.

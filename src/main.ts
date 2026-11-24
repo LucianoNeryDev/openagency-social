@@ -14,6 +14,7 @@ import { BrowserAdapter } from './platforms/browser/adapter.js'
 import { browserRules } from './platforms/browser/rules.js'
 import { InstagramLoginAdapter } from './platforms/instagram/adapter.js'
 import { MetaAdapter } from './platforms/meta/adapter.js'
+import { WhatsAppAdapter } from './platforms/whatsapp/adapter.js'
 import { YoutubeAdapter } from './platforms/youtube/adapter.js'
 import { LiquidDecisionModel } from './answering/decision.js'
 import { AnthropicDraftModel } from './answering/drafting.js'
@@ -34,6 +35,8 @@ const context: EngineContext = {
   adapters: new Map<Platform, PlatformAdapter>([
     ['meta', new MetaAdapter({ version: config.meta.graphVersion, redirectUri: config.meta.redirectUri })],
     ['instagram', new InstagramLoginAdapter({ version: config.meta.graphVersion, ...(config.instagram.redirectUri ? { redirectUri: config.instagram.redirectUri } : {}) })],
+    // WhatsApp numbers connect through the same Login for Business callback as Pages.
+    ['whatsapp', new WhatsAppAdapter({ version: config.meta.graphVersion, redirectUri: config.meta.redirectUri })],
     ['youtube', new YoutubeAdapter(config.google.redirectUri ? { redirectUri: config.google.redirectUri } : {})],
     ...(runner ? Object.values(browserRules).map(rules => [rules.platform, new BrowserAdapter(runner, rules)] as const) : []),
   ]),

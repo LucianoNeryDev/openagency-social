@@ -285,7 +285,8 @@ existed, until they are read again.
 ## Direct messages
 
 The engine reads the conversations of Facebook Pages (Messenger) and of
-Instagram accounts (Page-linked and Instagram login), and sends text messages
+Instagram accounts (Page-linked and Instagram login), receives those of
+WhatsApp business numbers (see "WhatsApp" below), and sends text messages
 the dashboard submits, each at most once, under the same contract as replies.
 Who decides what to send (a person, a rule or a model) is the dashboard's
 business; the engine stores what it reads, sends what it was given and
@@ -297,6 +298,7 @@ answers"), but it only sends what the dashboard submits. Browser channels and Yo
 | Facebook Page | `GET /{page-id}/conversations?platform=messenger` | `POST /{page-id}/messages` | `pages_messaging` | 2,000 characters |
 | Instagram (Page-linked) | `GET /me/conversations?platform=instagram` with the Page token | `POST /me/messages` | `instagram_manage_messages` | 1,000 UTF-8 bytes |
 | Instagram (own login) | `GET /me/conversations?platform=instagram` on graph.instagram.com | `POST /me/messages` on graph.instagram.com | `instagram_business_manage_messages` | 1,000 UTF-8 bytes |
+| WhatsApp number | Notifications only, forwarded by the dashboard | `POST /{phone-number-id}/messages` (Cloud API) | `whatsapp_business_messaging` | 4,096 characters |
 
 A connect that grants a Page `pages_messaging`, or its linked Instagram
 account `instagram_manage_messages`, also subscribes the Page to the app
@@ -338,10 +340,12 @@ channel is disabled.
 | `POST /v1/tenants/:org/conversations/sync` | `{channelId?}` → `{channelIds}`, the channels made due. |
 | `POST /v1/meta/notifications` | `{objects: [{object: 'page' \| 'instagram', id}]}` (1-100), from the dashboard's verified Meta webhook receiver, not tenant-scoped → `{channelIds}`. Only the IDs are read: the matching channels are read again. |
 
-A conversation: `{id, channelId, platform, participant: {name, username},
-lastMessageAt, lastInboundAt, windowOpenUntil, lastMessage: {direction, text,
-sentAt} | null}`. `platform` is `messenger` or `instagram`; Messenger gives
-a name, Instagram a username. `windowOpenUntil` is `lastInboundAt` plus 24
+A conversation: `{id, channelId, platform, participant: {name, username,
+phone?}, lastMessageAt, lastInboundAt, windowOpenUntil, lastMessage:
+{direction, text, sentAt} | null}`. `platform` is `messenger`, `instagram` or
+`whatsapp`; Messenger gives a name, Instagram a username, WhatsApp the
+profile name, a username when the person has one, and `phone` (`+<digits>`)
+when Meta gives the number. `windowOpenUntil` is `lastInboundAt` plus 24
 hours, or null when the person never wrote.
 
 ### Sending
@@ -361,8 +365,13 @@ requestKey = sha256(JSON.stringify(['social-message-send-v1', organizationId, me
 An outgoing message: `{id, requestKey, messageId, revision, digest,
 conversationId, channelId, approvedVia, draftId, state, errorCode, permission, platformMessageId,
 url, attemptCount, reconciling, sendAt, attemptedAt, settledAt, settledBy,
-directMessageId, resolution, notSentAllowed, updatedAt}`, the reply's view
-with the conversation in place of the post and comment. `url` is always null
+directMessageId, resolution, notSentAllowed, deliveryStatus, deliveryErrorCode,
+deliveryUpdatedAt, updatedAt}`, the reply's view with the conversation in place
+of the post and comment. `deliveryStatus` is what the platform reported after
+the send, on WhatsApp only (`sent`, `delivered`, `read` or `failed`, forward
+only; null elsewhere); a `failed` delivery keeps the message `sent`, with
+`deliveryErrorCode` (`outside_window`, `recipient_unavailable`,
+`message_not_allowed`, `rate_limited` or `rejected`). `url` is always null
 (messages have no permalink); `directMessageId` is the stored message it
 became, once a read saw it.
 
@@ -374,7 +383,9 @@ conversation); `409 missing_permission` (`detail.permission`), `paused`,
 nobody to answer), `outside_window` (the person's last message is more than
 24 hours before `sendAt`; `detail.windowOpenUntil`), `rate_limited` (60 an
 hour per channel), `daily_limit` (500 a day per channel), `revision_conflict`,
-`too_late`, and the `guard_*` codes of an automatic send.
+`too_late`, and the `guard_*` codes of an automatic send. On WhatsApp,
+`outside_window` also carries `detail.templateRequired: true`: only an
+approved template may be sent then, which the engine does not do.
 
 States, retries, the sweep and resolution work as for replies: the worker
 claims a due message and checks the claim just before the one request; a
@@ -388,6 +399,49 @@ text. Failure codes include `outside_window`, `missing_permission`,
 `channel_inactive`, `recipient_unavailable` (the person cannot be reached),
 `recipient_unknown`, `message_not_allowed`, `rate_limited`, `too_late`,
 `rejected` and `resolved_not_sent`.
+
+### WhatsApp
+
+A WhatsApp channel is one business phone number (`platform: whatsapp`,
+`kind: whatsapp_number`, the phone number ID), in a WhatsApp Business Account
+(WABA); it takes direct messages only, and publishes nothing ([ADR
+0006](adr/0006-whatsapp-numbers.md)). It connects through a provider app of
+platform `whatsapp` (the same Meta app may also be registered for `meta`):
+Facebook Login for Business with `whatsapp_business_management` and
+`whatsapp_business_messaging` makes every number of the WABAs the grant
+covers a channel, and subscribes the app to each WABA. WhatsApp has no API
+to read conversations: the engine knows only what the dashboard forwards.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/whatsapp/notifications` | The body of Meta's webhook request, unchanged (`application/json`, at most 1.1 MB), with its `X-Hub-Signature-256` header, from the dashboard's receiver; not tenant-scoped → `{stored, statuses, ignored}`. The engine checks the signature with the secret of the app each named number was connected through, and ignores the changes of numbers it does not hold, of another WABA, or not signed by their app. Inbound messages are stored once (by `wamid`); statuses update outgoing messages. A `5xx` means nothing was stored: the dashboard answers Meta with an error so Meta delivers it again. |
+| `POST /v1/tenants/:org/whatsapp/numbers` | `{providerAppId, businessAccountId, phoneNumberId, token}` → `201 {channels}`: an operator connects one number with a token they hold (a system user's). The number must be in that WABA (`400 number_not_in_account`) and the app's subscription to it must succeed. The token is sealed and never returned. |
+| `GET /v1/tenants/:org/conversations/:id/messages/:message/attachments/:index` | The bytes of a received attachment that has a `mediaId` (WhatsApp), read from Meta now, with its `content-type` (and `x-attachment-name`, URL-encoded, when it has a file name); at most 100 MB. `404 not_found`, `410 media_gone` (Meta keeps media about 30 days), `413 too_large`, `409 missing_permission`. |
+
+A WhatsApp conversation is keyed by the person's business-scoped user ID, or
+by their phone number when Meta gives no ID; a send goes to the phone number
+when known, else to the user ID. Its window runs from the person's newest
+message, like the others. Received media keep `{type, name?, mediaId,
+mimeType}`, never a URL. Messages of other types are stored with an
+attachment that names them and no text, or the text the person chose:
+`location` (its name and address, or coordinates, as `name`), `contacts`
+(the names), `reaction` (the emoji), `interactive` (a button or list reply;
+the text is its title), `button` (a template's quick reply; the text is its
+label), `sticker`, `order`, `system` and `unsupported`. Any attachment flags
+the message, so it is never answered without a person.
+
+Each send carries the outgoing message's `id` as `biz_opaque_callback_data`.
+Once Meta accepts it, the engine stores it in the conversation (as the sync
+does on Messenger) and marks the person's newest message as read; a failed
+read receipt changes nothing. Status notifications then set
+`deliveryStatus`. An uncertain send is settled by a status that names it;
+until one arrives, the reconciliation's looks find nothing, and a person
+decides after the 15-minute look as elsewhere. Errors: 131047 is
+`outside_window`, 131026 `recipient_unavailable`, 131049 and 131050
+`message_not_allowed`, 130429 (throughput), 131056 (pair rate) and Meta's
+app limits `rate_limited` and tried again, 131048 (spam rate) `rate_limited`
+and not tried again, 131005 `missing_permission`, 131000 and 5xx
+`uncertain`.
 
 ## AI answers
 
@@ -475,7 +529,12 @@ cases), the channel's name, and: for a direct message the conversation's
 newest 20 messages both ways; for a comment the post's caption, the comments
 above it and the channel's replies in that chain. Every text an outside
 person wrote is wrapped as escaped data (attribute values too), each capped
-at 2,000 characters. An `auto` item must be drafted and the drafting model
+at 2,000 characters. A direct message (Messenger, Instagram, WhatsApp) is
+drafted in a chat style: the answer first, one to three short sentences, no
+greeting or sign-off unless the person opened with a greeting that calls for
+one, no filler or restated question, plain text, and one clear next step
+when there is one. The brand's voice sets the tone; the style sets the
+length. Comments keep the platform's usual short reply. An `auto` item must be drafted and the drafting model
 must agree: without a draft it becomes `review` (`no_draft`); when the model
 says no answer is needed or raises any flag, `review` (`flagged`); with a
 draft longer than the channel takes, `review` (`draft_too_long`, and the
