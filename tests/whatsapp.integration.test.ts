@@ -320,20 +320,22 @@ describe.skipIf(!required)('WhatsApp on PostgreSQL 17', { timeout: 60_000 }, () 
   it('decides and drafts WhatsApp messages like any direct message, within 4,096 characters', async () => {
     await connect()
     const inputs: DraftInput[] = []
-    const decisionModel: DecisionModel = { async decide() { return { model: 'd1.1-test', choice: 'draft', probabilities: { full: 0.1, draft: 0.8, none: 0.1 }, confidence: 0.8, cost: 0 } } }
+    const decisionModel: DecisionModel = { async decide() { return { model: 'd1.1-test', answer: { choice: 'draft', probabilities: { full: 0.1, draft: 0.8, none: 0.1 },
+      confidence: 0.8 }, risk: { choice: 'medium', probabilities: { low: 0.3, medium: 0.6, high: 0.1 }, confidence: 0.6 }, cost: 0 } } }
     const draftModel: DraftModel = { async draft(input) {
       inputs.push(input)
       return { model: 'claude-haiku-5-5', output: { needsReply: true, reply: 'Sì, fino alle 19.', language: 'it', summary: 'Orari.', flags: [] } }
     } }
     context = { ...context, decisionModel, draftModel }
     await putAnswering(context, org, { version: 1, settings: { enabled: false, drafts: true, kinds: { messages: true, comments: false }, decisionModel: 'd1.1',
-      decisionPrompt: 'Answer opening hours.', decisionThreshold: 0.9, noneThreshold: 0.8, replyModel: 'haiku', voice: '', replyContext: '', delaySeconds: 120, cases: [] },
+      decisionPrompt: 'Answer opening hours.', decisionThreshold: 0.9, noneThreshold: 0.8, riskThreshold: 30, replyModel: 'haiku', voice: '', replyContext: '', delaySeconds: 120, cases: [] },
     context: [] })
     advance(1_000)
     await receive(inbound('Siete aperti domenica?'))
     expect(await runAnswering(context)).toEqual({ drafted: 1, failed: 0 })
     expect(inputs[0]).toMatchObject({ kind: 'message', channel: { platform: 'whatsapp' }, maxLength: { value: 4_096, unit: 'characters' } })
-    expect(await db.select().from(inboundDrafts)).toMatchObject([{ kind: 'message', outcome: 'review', draftText: 'Sì, fino alle 19.' }])
+    expect(await db.select().from(inboundDrafts)).toMatchObject([{ kind: 'message', outcome: 'review', draftText: 'Sì, fino alle 19.', riskLevel: 'medium',
+      riskScore: 40, riskThreshold: 30 }])
   })
 
   it('takes notifications over HTTP with Meta\'s signature header', async () => {

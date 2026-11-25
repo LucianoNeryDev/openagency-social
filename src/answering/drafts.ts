@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { clock, type EngineContext } from '../context.js'
 import type { Executor } from '../db/client.js'
 import { inboundDrafts, outgoingMessages, postResponses, replies, type DraftKind } from '../db/schema.js'
+import { riskClears, type RiskAssessment } from './decision.js'
 import { conflict } from '../errors.js'
 import { lockAnswering, minAutoDelaySeconds, readAnswering } from './settings.js'
 
@@ -30,6 +31,10 @@ export interface DraftView {
     model: string | null
     probabilities: DraftRow['probabilities']
     confidence: number | null
+    /** Null when the risk was not asked, the call failed, or the item was decided before risk existed. */
+    risk: RiskAssessment | null
+    /** Null for items decided before risk existed. */
+    riskThreshold: number | null
     caseId: string | null
     decisionThreshold: number
     noneThreshold: number
@@ -47,12 +52,17 @@ export interface DraftView {
   createdAt: string
 }
 
+function riskOf(row: DraftRow): RiskAssessment | null {
+  if (row.riskLevel === null || row.riskScore === null || row.riskProbabilities === null || row.riskConfidence === null) return null
+  return { level: row.riskLevel, score: row.riskScore, probabilities: row.riskProbabilities, confidence: row.riskConfidence }
+}
+
 export function draftView(row: DraftRow, extra: { jobId: string | null, supersedes: string[] }): DraftView {
   return {
     id: row.id, organizationId: row.organizationId, kind: row.kind, channelId: row.channelId, conversationId: row.conversationId,
     responseId: row.responseId, jobId: extra.jobId, inboundExternalId: row.inboundExternalId,
     decision: { outcome: row.outcome, reason: row.reason, model: row.decisionModel, probabilities: row.probabilities, confidence: row.confidence,
-      caseId: row.caseId, decisionThreshold: row.decisionThreshold, noneThreshold: row.noneThreshold, cost: row.cost, errorCode: row.errorCode,
+      risk: riskOf(row), riskThreshold: row.riskThreshold, caseId: row.caseId, decisionThreshold: row.decisionThreshold, noneThreshold: row.noneThreshold, cost: row.cost, errorCode: row.errorCode,
       settingsVersion: row.settingsVersion },
     draft: row.draftText && row.draftDigest
       ? { text: row.draftText, digest: row.draftDigest, model: row.draftModel, language: row.draftLanguage, flags: row.draftFlags } : null,
@@ -103,7 +113,8 @@ export type AutomationTarget =
 /**
  * Refuses an automatic send (`409 guard_<name>`) unless the engine's own
  * records allow it: the draft is the tenant's, of this kind and target; its
- * decision is `auto`; the tenant's current settings have automatic sending
+ * decision is `auto` with a stored risk score strictly below the risk
+ * threshold stored with it; the tenant's current settings have automatic sending
  * and the kind on; the submission is revision 1 with the draft's digest
  * (unedited); the draft is not superseded; `sendAt` is at least the delay
  * (never under 60 s) after the draft; and no automatic send used it yet.
@@ -123,6 +134,8 @@ export async function checkAutomation(executor: Executor, organizationId: string
     if (!response || response.jobId !== input.jobId || response.externalId !== input.parentExternalId) throw refuse('guard_draft', 'The draft answers another comment')
   }
   if (draft.outcome !== 'auto') throw refuse('guard_decision', 'The engine did not clear this item for an automatic answer')
+  // The stored risk, against the threshold stored with it: a decision without both never goes out unseen.
+  if (!riskClears(draft.riskScore, draft.riskThreshold)) throw refuse('guard_decision', 'The item\'s stored risk does not allow an automatic answer')
   const answering = await readAnswering(executor, organizationId)
   const settings = answering?.settings
   if (!settings?.enabled || !settings.drafts || !settings.kinds[input.kind === 'message' ? 'messages' : 'comments']) {

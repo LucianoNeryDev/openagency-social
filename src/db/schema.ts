@@ -775,6 +775,8 @@ export interface AnsweringSettings {
   decisionPrompt: string
   decisionThreshold: number
   noneThreshold: number
+  /** 0 to 100: an `auto` decision needs a risk score strictly below it. */
+  riskThreshold: number
   replyModel: ReplyModelChoice
   voice: string
   replyContext: string
@@ -788,11 +790,14 @@ export interface AnsweringContextEntry {
   body: string
 }
 
+/** Settings as stored: those pushed before `riskThreshold` existed lack it (read them through `storedSettings`). */
+export type StoredAnsweringSettings = Omit<AnsweringSettings, 'riskThreshold'> & { riskThreshold?: number }
+
 /** What the dashboard pushed last. No row: the feature is off for the tenant. */
 export const answeringSettings = pgTable('answering_settings', {
   organizationId: text('organization_id').primaryKey(),
   version: integer('version').notNull(),
-  settings: jsonb('settings').$type<AnsweringSettings>().notNull(),
+  settings: jsonb('settings').$type<StoredAnsweringSettings>().notNull(),
   context: jsonb('context').$type<AnsweringContextEntry[]>().notNull().default([]),
   // When DMs and comments were last switched on (`drafts` and the kind): items of that kind first seen before it are never processed.
   messagesEnabledAt: timestamp('messages_enabled_at', { withTimezone: true }),
@@ -809,6 +814,10 @@ export type DraftKind = typeof draftKinds[number]
 /** `auto` (full), `review` (draft), `none` (no answer needed), `skipped` (not decided: treated as review). */
 export const decisionOutcomes = ['auto', 'review', 'none', 'skipped'] as const
 export type DecisionOutcome = typeof decisionOutcomes[number]
+/** How risky answering an item without a person would be, as the decision model chose. */
+export const riskLevels = ['low', 'medium', 'high'] as const
+export type RiskLevel = typeof riskLevels[number]
+export interface RiskProbabilities { low: number, medium: number, high: number }
 
 /**
  * The engine's decision about one inbound DM or comment, and its draft. The
@@ -832,6 +841,13 @@ export const inboundDrafts = pgTable('inbound_drafts', {
   caseId: text('case_id'),
   decisionThreshold: doublePrecision('decision_threshold').notNull(),
   noneThreshold: doublePrecision('none_threshold').notNull(),
+  // The risk of answering it unseen: null when not asked (no decision model, a failed call, or decided before it existed).
+  riskLevel: text('risk_level').$type<RiskLevel>(),
+  riskScore: integer('risk_score'),
+  riskProbabilities: jsonb('risk_probabilities').$type<RiskProbabilities>(),
+  riskConfidence: doublePrecision('risk_confidence'),
+  // The threshold the decision was held to; null for decisions made before it existed.
+  riskThreshold: integer('risk_threshold'),
   // What the decision call cost (USD), as reported.
   cost: doublePrecision('cost'),
   errorCode: text('error_code'),
@@ -853,6 +869,9 @@ export const inboundDrafts = pgTable('inbound_drafts', {
 }, table => [
   check('inbound_drafts_kind', oneOf('kind', draftKinds)),
   check('inbound_drafts_outcome', oneOf('outcome', decisionOutcomes)),
+  check('inbound_drafts_risk_level', oneOf('risk_level', riskLevels)),
+  check('inbound_drafts_risk', sql`(risk_level is null) = (risk_score is null) and (risk_level is null) = (risk_probabilities is null)
+    and (risk_level is null) = (risk_confidence is null) and risk_score between 0 and 100 and risk_threshold between 0 and 100`),
   check('inbound_drafts_target', sql`(kind = 'message') = (conversation_id is not null) and (kind = 'comment') = (response_id is not null)`),
   check('inbound_drafts_text_length', sql`char_length(draft_text) between 1 and 10000`),
   check('inbound_drafts_digest', sql`(draft_text is null) = (draft_digest is null) and (draft_digest is null or draft_digest ~ '^[0-9a-f]{64}$')`),

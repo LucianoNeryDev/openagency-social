@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildDecisionRequest, caseMatches, decide, DecisionError, LiquidDecisionModel, type DecisionItem, type DecisionModel } from '../src/answering/decision.js'
+import { buildDecisionRequest, caseMatches, decide, DecisionError, LiquidDecisionModel, riskClears, riskScore, type DecisionItem, type DecisionModel } from '../src/answering/decision.js'
 import { AnthropicDraftModel, attr, buildDraftPrompt, commentStyle, directMessageStyle, draftFits, registerRule, draftLimits, DraftError, type DraftInput } from '../src/answering/drafting.js'
 import { draftObjection } from '../src/answering/pipeline.js'
 import { answeringPutSchema, answeringSettingsSchema } from '../src/answering/settings.js'
@@ -21,29 +21,37 @@ const channel = { id: '00000000-0000-4000-8000-000000000001', name: 'Example Sho
 const item = (overrides: Partial<DecisionItem> = {}): DecisionItem => ({ kind: 'message', channel, author: { name: 'A Person', handle: 'a.person' },
   text: 'Do you ship abroad?', attachments: [], ...overrides })
 
-/** A decision model that answers what it is given and remembers the requests. */
-function fakeDecision(answer: { choice: 'full' | 'draft' | 'none', full: number, draft: number, none: number } | Error) {
+type RiskAnswer = { choice: 'low' | 'medium' | 'high', low: number, medium: number, high: number }
+const lowRisk: RiskAnswer = { choice: 'low', low: 0.88, medium: 0.1, high: 0.02 }
+
+/** A decision model that answers the questions it is asked with what it is given, and remembers the requests. */
+function fakeDecision(answer: { choice: 'full' | 'draft' | 'none', full: number, draft: number, none: number } | Error, risk: RiskAnswer | Error = lowRisk) {
   const calls: Array<Parameters<DecisionModel['decide']>[0]> = []
   const model: DecisionModel = {
     async decide(input) {
       calls.push(input)
-      if (answer instanceof Error) throw answer
-      return { model: 'd1.1-test', choice: answer.choice, probabilities: { full: answer.full, draft: answer.draft, none: answer.none }, confidence: 0.9, cost: 0.0001 }
+      if (input.questions.answer && answer instanceof Error) throw answer
+      if (input.questions.risk && risk instanceof Error) throw risk
+      return { model: 'd1.1-test', cost: 0.0001,
+        ...input.questions.answer && !(answer instanceof Error)
+          ? { answer: { choice: answer.choice, probabilities: { full: answer.full, draft: answer.draft, none: answer.none }, confidence: 0.9 } } : {},
+        ...input.questions.risk && !(risk instanceof Error)
+          ? { risk: { choice: risk.choice, probabilities: { low: risk.low, medium: risk.medium, high: risk.high }, confidence: 0.81 } } : {} }
     },
   }
-  return { model, calls }
+  return { model, calls, asked: () => calls.map(call => Object.keys(call.questions)) }
 }
 
 describe('decision', () => {
   it('follows the outcome order: never, always, no model, the model, none, review', async () => {
     const asked = fakeDecision({ choice: 'full', full: 0.95, draft: 0.04, none: 0.01 })
-    // A never case wins over everything and asks nothing.
+    // A never case wins over everything and asks only the risk.
     expect(await decide({ settings, context: [], item: item({ author: { name: null, handle: 'some.handle' }, text: 'orari di apertura?' }), flagged: false,
-      model: asked.model })).toMatchObject({ outcome: 'review', reason: 'case_never', caseId: 'vip', model: null })
-    // An always case answers without asking.
+      model: asked.model })).toMatchObject({ outcome: 'review', reason: 'case_never', caseId: 'vip', probabilities: null, risk: { level: 'low' } })
+    // An always case answers without asking the answer question (the risk is asked alone).
     expect(await decide({ settings, context: [], item: item({ text: 'Quali sono gli ORARI di apertura?' }), flagged: false, model: asked.model }))
-      .toMatchObject({ outcome: 'auto', reason: 'case_always', caseId: 'hours' })
-    expect(asked.calls).toHaveLength(0)
+      .toMatchObject({ outcome: 'auto', reason: 'case_always', caseId: 'hours', risk: { level: 'low', score: 7 } })
+    expect(asked.asked()).toEqual([['risk'], ['risk']])
     // ...but a flagged item is never auto.
     expect(await decide({ settings, context: [], item: item({ text: 'orari di apertura', attachments: ['image'] }), flagged: true, model: asked.model }))
       .toMatchObject({ outcome: 'review', reason: 'flagged' })
@@ -52,7 +60,7 @@ describe('decision', () => {
     // Above the threshold: auto, with the numbers recorded.
     expect(await decide({ settings, context: [], item: item(), flagged: false, model: asked.model })).toEqual({ outcome: 'auto', reason: 'above_threshold',
       model: 'd1.1-test', probabilities: { full: 0.95, draft: 0.04, none: 0.01 }, confidence: 0.9, caseId: null, decisionThreshold: 0.85, noneThreshold: 0.8,
-      cost: 0.0001, errorCode: null })
+      risk: { level: 'low', score: 7, probabilities: { low: 0.88, medium: 0.1, high: 0.02 }, confidence: 0.81 }, riskThreshold: 30, cost: 0.0001, errorCode: null })
     // Flagged items are asked (so they can be none) but never auto.
     expect(await decide({ settings, context: [], item: item(), flagged: true, model: asked.model })).toMatchObject({ outcome: 'review', reason: 'flagged',
       probabilities: { full: 0.95 } })
@@ -87,8 +95,82 @@ describe('decision', () => {
       .toMatchObject({ outcome: 'review', reason: 'automation_off', caseId: 'hours' })
     const before = asked.calls.length
     expect(await decide({ settings: { ...settings, decisionPrompt: '' }, context: [], item: item(), flagged: false, model: asked.model }))
-      .toMatchObject({ outcome: 'review', reason: 'no_decision_prompt' })
-    expect(asked.calls).toHaveLength(before)
+      .toMatchObject({ outcome: 'review', reason: 'no_decision_prompt', probabilities: null })
+    expect(asked.asked().slice(before)).toEqual([['risk']])
+  })
+
+  it('scores risk as 0.5 p(medium) + p(high), on 0 to 100', () => {
+    expect(riskScore({ low: 0.88, medium: 0.1, high: 0.02 })).toBe(7)
+    expect(riskScore({ low: 1, medium: 0, high: 0 })).toBe(0)
+    expect(riskScore({ low: 0, medium: 0, high: 1 })).toBe(100)
+    expect(riskScore({ low: 0, medium: 1, high: 0 })).toBe(50)
+    expect(riskScore({ low: 0.2, medium: 0.5, high: 0.3 })).toBe(55)
+    expect(riskScore({ low: 0.6, medium: 0.25, high: 0.15 })).toBe(28)
+    // Off-distribution numbers still stay on the scale.
+    expect(riskScore({ low: 0, medium: 1, high: 1 })).toBe(100)
+    // Only a score strictly below the threshold clears; an unknown one never does.
+    expect(riskClears(29, 30)).toBe(true)
+    expect(riskClears(30, 30)).toBe(false)
+    expect(riskClears(0, 0)).toBe(false)
+    expect(riskClears(null, 30)).toBe(false)
+    expect(riskClears(5, null)).toBe(false)
+  })
+
+  it('holds auto to the risk threshold, on the model path and on an always case, keeping the numbers', async () => {
+    const atThreshold = fakeDecision({ choice: 'full', full: 0.95, draft: 0.04, none: 0.01 }, { choice: 'medium', low: 0.4, medium: 0.6, high: 0 })
+    expect(await decide({ settings, context: [], item: item(), flagged: false, model: atThreshold.model })).toMatchObject({ outcome: 'review',
+      reason: 'risk_above_threshold', probabilities: { full: 0.95 }, risk: { level: 'medium', score: 30 }, riskThreshold: 30 })
+    expect(await decide({ settings: { ...settings, riskThreshold: 31 }, context: [], item: item(), flagged: false, model: atThreshold.model }))
+      .toMatchObject({ outcome: 'auto', reason: 'above_threshold', riskThreshold: 31 })
+    const high = fakeDecision({ choice: 'full', full: 0.99, draft: 0.01, none: 0 }, { choice: 'high', low: 0.05, medium: 0.15, high: 0.8 })
+    expect(await decide({ settings, context: [], item: item({ text: 'orari di apertura' }), flagged: false, model: high.model }))
+      .toMatchObject({ outcome: 'review', reason: 'risk_above_threshold', caseId: 'hours', risk: { level: 'high', score: 88 } })
+    // 0 lets nothing through on risk.
+    expect(await decide({ settings: { ...settings, riskThreshold: 0 }, context: [], item: item(), flagged: false,
+      model: fakeDecision({ choice: 'full', full: 0.99, draft: 0.01, none: 0 }, { choice: 'low', low: 1, medium: 0, high: 0 }).model }))
+      .toMatchObject({ outcome: 'review', reason: 'risk_above_threshold', risk: { score: 0 } })
+    // The gate comes before automation off; outcomes other than auto keep their reason.
+    expect(await decide({ settings: { ...settings, enabled: false }, context: [], item: item(), flagged: false, model: high.model }))
+      .toMatchObject({ outcome: 'review', reason: 'risk_above_threshold' })
+    const none = fakeDecision({ choice: 'none', full: 0, draft: 0.1, none: 0.9 }, { choice: 'high', low: 0, medium: 0, high: 1 })
+    expect(await decide({ settings, context: [], item: item(), flagged: false, model: none.model })).toMatchObject({ outcome: 'none', reason: 'no_reply',
+      risk: { score: 100 } })
+  })
+
+  it('never answers automatically on an unknown risk', async () => {
+    // No decision model: nothing is asked, so an always case goes to a person.
+    expect(await decide({ settings, context: [], item: item({ text: 'orari di apertura' }), flagged: false, model: undefined }))
+      .toMatchObject({ outcome: 'review', reason: 'risk_above_threshold', caseId: 'hours', risk: null, model: null })
+    // The risk-only call fails: an always case is skipped like any failed call; a never case keeps its reason and records the failure.
+    const failing = fakeDecision({ choice: 'full', full: 0.99, draft: 0.01, none: 0 }, new DecisionError('http_503', 'down'))
+    expect(await decide({ settings, context: [], item: item({ text: 'orari di apertura' }), flagged: false, model: failing.model }))
+      .toMatchObject({ outcome: 'skipped', reason: 'decision_failed', caseId: 'hours', risk: null, errorCode: 'http_503' })
+    expect(await decide({ settings, context: [], item: item({ author: { name: null, handle: 'some.handle' } }), flagged: false, model: failing.model }))
+      .toMatchObject({ outcome: 'review', reason: 'case_never', risk: null, errorCode: 'http_503' })
+    // Both questions in one call: a failure there fails the whole decision.
+    expect(await decide({ settings, context: [], item: item(), flagged: false, model: failing.model }))
+      .toMatchObject({ outcome: 'skipped', reason: 'decision_failed', probabilities: null, risk: null })
+    // A model that leaves out the risk answer is a malformed answer.
+    const silent: DecisionModel = { async decide() { return { model: 'd1.1-test', answer: { choice: 'full', probabilities: { full: 1, draft: 0, none: 0 }, confidence: 1 } } } }
+    expect(await decide({ settings, context: [], item: item(), flagged: false, model: silent }))
+      .toMatchObject({ outcome: 'skipped', reason: 'decision_failed', errorCode: 'malformed' })
+  })
+
+  it('asks the risk alone wherever it did not ask the answer question, and both together otherwise', async () => {
+    const asked = fakeDecision({ choice: 'draft', full: 0.2, draft: 0.7, none: 0.1 })
+    const run = (overrides: Partial<DecisionItem>, extra: Partial<AnsweringSettings> = {}, flagged = false) =>
+      decide({ settings: { ...settings, ...extra }, context: [], item: item(overrides), flagged, model: asked.model })
+    await run({ author: { name: null, handle: 'some.handle' } })
+    await run({ text: 'orari di apertura' })
+    await run({ text: 'orari di apertura', attachments: ['image'] }, {}, true)
+    await run({}, { decisionPrompt: '' })
+    await run({})
+    await run({}, { enabled: false })
+    await run({ attachments: ['image'] }, {}, true)
+    expect(asked.asked()).toEqual([['risk'], ['risk'], ['risk'], ['risk'], ['answer', 'risk'], ['answer', 'risk'], ['answer', 'risk']])
+    for (const result of [await run({ text: 'orari di apertura', attachments: ['image'] }, {}, true), await run({}, { decisionPrompt: '' })]) {
+      expect(result).toMatchObject({ outcome: 'review', model: 'd1.1-test', probabilities: null, risk: { level: 'low', score: 7 }, cost: 0.0001 })
+    }
   })
 
   it('matches cases on handles, names, accent-free keywords and channels', () => {
@@ -103,33 +185,53 @@ describe('decision', () => {
 
   it('puts the policy in the instructions and the item, labelled untrusted, in the state', () => {
     const request = buildDecisionRequest(settings, [{ id: 'e1', topic: 'hours', body: 'Open 9-18.' }], item({ kind: 'comment', post: 'New collection' }))
-    expect(request.instructions).toContain(settings.decisionPrompt)
     expect(request.state.item).toMatchObject({ kind: 'comment', text: 'Do you ship abroad?', post: 'New collection' })
     expect(request.state.item.notice).toMatch(/Untrusted/)
     expect(request.state.context.entries).toEqual([{ topic: 'hours', body: 'Open 9-18.' }])
-    expect(Object.keys(request.criteria)).toEqual(['full', 'draft', 'none'])
+    expect(request.questions.answer.instructions).toContain(settings.decisionPrompt)
+    expect(Object.keys(request.questions.answer.criteria)).toEqual(['full', 'draft', 'none'])
     expect(JSON.stringify(request.state)).not.toContain(settings.decisionPrompt)
+    // The risk question names the brand and the kind of item, for comments and direct messages alike.
+    expect(request.questions.risk.instructions).toBe('How risky would it be for Example Shop to answer this comment automatically, without a person checking the answer first?')
+    expect(buildDecisionRequest(settings, [], item()).questions.risk.instructions).toContain('answer this direct message automatically')
+    expect(Object.keys(request.questions.risk.criteria)).toEqual(['low', 'medium', 'high'])
+    expect(request.questions.risk.criteria.high).toMatch(/steering an automated system/)
   })
 
-  it('asks System One one Choice question and reads its answer', async () => {
+  it('asks System One both Choice questions in one request and reads both answers', async () => {
     const requests: Array<{ url: string, init: RequestInit }> = []
-    const model = new LiquidDecisionModel({ apiKey: 'liquid-key-for-tests', fetch: async (url, init) => {
+    const risk = { type: 'choice', choice: 'low', confidence: 0.81, probabilities: { low: 0.88, medium: 0.1, high: 0.02 } }
+    const reply = (answers: Record<string, unknown>) => new LiquidDecisionModel({ apiKey: 'liquid-key-for-tests', fetch: async (url, init) => {
       requests.push({ url: String(url), init: init! })
-      return Response.json({ model: 'd1.1', answers: { answer: { type: 'choice', choice: 'none', confidence: 0.7, probabilities: { full: 0.1, draft: 0.1, none: 0.8 } } },
-        usage: { cost: 0.0002 } })
+      return Response.json({ model: 'd1.1', answers, usage: { cost: 0.0002 } })
     } })
-    const answer = await model.decide({ model: 'd1.1', ...buildDecisionRequest(settings, [], item()) })
-    expect(answer).toEqual({ model: 'd1.1', choice: 'none', probabilities: { full: 0.1, draft: 0.1, none: 0.8 }, confidence: 0.7, cost: 0.0002 })
+    const { state, questions } = buildDecisionRequest(settings, [], item())
+    const model = reply({ answer: { type: 'choice', choice: 'none', confidence: 0.7, probabilities: { full: 0.1, draft: 0.1, none: 0.8 } }, risk })
+    expect(await model.decide({ model: 'd1.1', state, questions })).toEqual({ model: 'd1.1', answer: { choice: 'none', probabilities: { full: 0.1, draft: 0.1, none: 0.8 },
+      confidence: 0.7 }, risk: { choice: 'low', probabilities: { low: 0.88, medium: 0.1, high: 0.02 }, confidence: 0.81 }, cost: 0.0002 })
     expect(requests[0]!.url).toBe('https://api.liquid.ai/v1/systemone')
     expect(requests[0]!.init.redirect).toBe('error')
-    const body = JSON.parse(String(requests[0]!.init.body)) as { model: string, questions: Record<string, { type: string, criteria: Record<string, string> }> }
+    const body = JSON.parse(String(requests[0]!.init.body)) as { model: string, questions: Record<string, { type: string, instructions: string, criteria: Record<string, string> }> }
     expect(body.model).toBe('d1.1')
+    expect(Object.keys(body.questions)).toEqual(['answer', 'risk'])
     expect(body.questions.answer!.type).toBe('choice')
     expect(Object.keys(body.questions.answer!.criteria)).toEqual(['full', 'draft', 'none'])
-    const broken = new LiquidDecisionModel({ apiKey: 'k', fetch: async () => Response.json({ model: 'd1.1', answers: {} }) })
-    await expect(broken.decide({ model: 'd1.1', ...buildDecisionRequest(settings, [], item()) })).rejects.toMatchObject({ code: 'malformed' })
+    expect(body.questions.risk).toEqual({ type: 'choice', instructions: questions.risk.instructions, criteria: questions.risk.criteria })
+
+    // The risk alone.
+    expect(await reply({ risk }).decide({ model: 'd1.1', state, questions: { risk: questions.risk } })).toEqual({ model: 'd1.1',
+      risk: { choice: 'low', probabilities: { low: 0.88, medium: 0.1, high: 0.02 }, confidence: 0.81 }, cost: 0.0002 })
+    expect(Object.keys((JSON.parse(String(requests.at(-1)!.init.body)) as { questions: object }).questions)).toEqual(['risk'])
+
+    // Fail closed: a missing or malformed answer to any question asked makes the whole response malformed.
+    const answer = { type: 'choice', choice: 'full', confidence: 0.9, probabilities: { full: 0.9, draft: 0.1, none: 0 } }
+    for (const answers of [{}, { answer }, { answer, risk: { ...risk, choice: 'extreme' } }, { answer, risk: { ...risk, probabilities: { low: 0.9, medium: 0.1 } } },
+      { answer, risk: { ...risk, probabilities: { full: 0.9, draft: 0.1, none: 0 } } }, { answer, risk: { ...risk, confidence: 2 } }, { answer, risk: 'low' },
+      { answer: { ...answer, choice: 'low' }, risk }]) {
+      await expect(reply(answers).decide({ model: 'd1.1', state, questions })).rejects.toMatchObject({ code: 'malformed' })
+    }
     const limited = new LiquidDecisionModel({ apiKey: 'k', fetch: async () => new Response('', { status: 429 }) })
-    await expect(limited.decide({ model: 'd1.1', ...buildDecisionRequest(settings, [], item()) })).rejects.toMatchObject({ code: 'rate_limited' })
+    await expect(limited.decide({ model: 'd1.1', state, questions })).rejects.toMatchObject({ code: 'rate_limited' })
   })
 })
 
@@ -289,7 +391,9 @@ describe('answering settings', () => {
     delaySeconds: 60, cases: [] }
 
   it('fills the documented defaults and refuses unknown fields and unsafe values', () => {
-    expect(answeringSettingsSchema.parse(valid)).toMatchObject({ decisionModel: 'd1.1', replyModel: 'haiku', noneThreshold: 0.8, replyContext: '' })
+    expect(answeringSettingsSchema.parse(valid)).toMatchObject({ decisionModel: 'd1.1', replyModel: 'haiku', noneThreshold: 0.8, riskThreshold: 30, replyContext: '' })
+    for (const riskThreshold of [0, 55, 100]) expect(answeringSettingsSchema.parse({ ...valid, riskThreshold })).toMatchObject({ riskThreshold })
+    for (const riskThreshold of [-1, 101, 30.5, '30', null]) expect(answeringSettingsSchema.safeParse({ ...valid, riskThreshold }).success).toBe(false)
     expect(answeringSettingsSchema.safeParse({ ...valid, extra: true }).success).toBe(false)
     expect(answeringSettingsSchema.safeParse({ ...valid, delaySeconds: 59 }).success).toBe(false)
     expect(answeringSettingsSchema.safeParse({ ...valid, noneThreshold: 0.4 }).success).toBe(false)

@@ -482,7 +482,7 @@ without Anthropic no drafts are written and items arrive without one.
   "settings": {
     "enabled": false, "drafts": true, "kinds": { "messages": true, "comments": true },
     "decisionModel": "d1.1", "decisionPrompt": "Answer questions about opening hours and shipping; never complaints.",
-    "decisionThreshold": 0.9, "noneThreshold": 0.8, "replyModel": "haiku",
+    "decisionThreshold": 0.9, "noneThreshold": 0.8, "riskThreshold": 30, "replyModel": "haiku",
     "voice": "Warm, short, informal.", "replyContext": "We ship in the EU only.", "delaySeconds": 120,
     "cases": [{ "id": "press", "effect": "never", "label": "Press", "authors": ["some.magazine"], "keywords": [], "channelIds": [] }]
   },
@@ -493,7 +493,9 @@ without Anthropic no drafts are written and items arrive without one.
 Unknown fields are refused. `drafts` turns deciding and drafting on;
 `kinds` says for which items (and also gates automatic sends); `enabled`
 turns automatic sending on. `decisionModel` defaults to `d1.1`,
-`noneThreshold` to 0.8 (0.5 to 1, like `decisionThreshold`), `replyModel` to
+`noneThreshold` to 0.8 (0.5 to 1, like `decisionThreshold`), `riskThreshold`
+to 30 (an integer, 0 to 100; settings stored before it existed read as 30),
+`replyModel` to
 `haiku` (`claude-haiku-5-5`; `sonnet` and `opus` are `claude-sonnet-5-5` and
 `claude-opus-5-5`). `delaySeconds` is 60 to 86,400. A case matches when every
 condition it sets holds: `authors` (a username or name, `@` and case ignored),
@@ -514,24 +516,49 @@ it is less than 24 hours old and a person at the brand has not answered since
 its own decision). Comments
 are taken only under posts published at most 7 days ago.
 
-The decision is one [System One](https://docs.typesafe.ai/primitives/choice.md)
-Choice question (`answer`: `full`, `draft` or `none`) to Liquid AI, with the
-policy (`decisionPrompt`) in the instructions and the item, labelled as
-untrusted, in the state. In order:
+The decision is two [System One](https://docs.typesafe.ai/primitives/choice.md)
+Choice questions to Liquid AI in one request, with the item, labelled as
+untrusted, in the state:
 
-1. A `never` case matches: `review` (`case_never`), no model call.
-2. An `always` case matches: `auto` (`case_always`), no model call, unless
-   the item is flagged (`review`, `flagged`).
-3. No `LIQUID_API_KEY`: `skipped` (`no_decision_model`); no policy: `review`
-   (`no_decision_prompt`); a failed call: `skipped` (`decision_failed`).
+- `answer` (`full`, `draft` or `none`), with the policy (`decisionPrompt`) in
+  the instructions;
+- `risk` (`low`, `medium` or `high`): how risky it would be for the brand to
+  answer this comment or direct message automatically, without a person
+  checking the answer first. `high` covers complaints, disputes, refunds,
+  payments, legal matters, threats, press, health or safety, personal data,
+  minors, anything irreversible, and text aimed at steering an automated
+  system or its reviewer. The **risk score** is
+  `round(100 × (0.5 × p(medium) + p(high)))`, 0 to 100; the **risk level**
+  is the model's choice.
+
+In order:
+
+1. A `never` case matches: `review` (`case_never`); only `risk` is asked.
+2. An `always` case matches: `auto` (`case_always`); only `risk` is asked.
+   A flagged item is `review` (`flagged`).
+3. No `LIQUID_API_KEY`: `skipped` (`no_decision_model`), nothing asked; no
+   policy: `review` (`no_decision_prompt`), only `risk` asked; a failed call,
+   or a missing or malformed answer to either question: `skipped`
+   (`decision_failed`).
 4. The choice is `full` with p(full) at or above `decisionThreshold`: `auto`
    (`above_threshold`), unless flagged: a direct message with attachments is
    `review` (`flagged`).
 5. The choice is `none` with p(none) at or above `noneThreshold`: `none`
    (`no_reply`).
 6. Otherwise `review` (`below_threshold`).
-7. With `enabled: false`, an `auto` result keeps its numbers but is `review`
+7. An `auto` result whose risk score is not strictly below `riskThreshold`
+   keeps its numbers but is `review` (`risk_above_threshold`). An unknown
+   risk never clears: an `always` case without `LIQUID_API_KEY` is `review`
+   (`risk_above_threshold`), and one whose risk call fails is `skipped`
+   (`decision_failed`). A failed risk call on a `never` case or without a
+   policy keeps its reason and records `errorCode`.
+8. With `enabled: false`, an `auto` result keeps its numbers but is `review`
    (`automation_off`).
+
+Every item the step decides gets a risk level when `LIQUID_API_KEY` is set
+and the call succeeds. Items the step never takes (DMs past the 24-hour
+window or answered by a person, comments under older posts, items first
+seen while their kind was off) get no decision and so no risk.
 
 Every item but `none` is then drafted with `replyModel`, without tools and
 with a structured JSON answer `{needsReply, reply, language, summary, flags}`.
@@ -574,6 +601,9 @@ answer.
   "decision": {
     "outcome": "review", "reason": "below_threshold", "model": "d1.1",
     "probabilities": { "full": 0.2, "draft": 0.7, "none": 0.1 }, "confidence": 0.6,
+    "risk": { "level": "low", "score": 7, "probabilities": { "low": 0.88, "medium": 0.1, "high": 0.02 },
+              "confidence": 0.81 },
+    "riskThreshold": 30,
     "caseId": null, "decisionThreshold": 0.9, "noneThreshold": 0.8, "cost": 0.0001,
     "errorCode": null, "settingsVersion": 7
   },
@@ -586,7 +616,12 @@ answer.
 `kind` is `message` (with `conversationId`) or `comment` (with `responseId`,
 and the post's `jobId`; `inboundExternalId` is then the reply's
 `parentExternalId`). `outcome` is `auto` (full), `review` (draft), `none` or
-`skipped` (treated as review). `draft` is null for `none` and when nothing
+`skipped` (treated as review). `probabilities` and `confidence` are the
+`answer` question's, null when it was not asked. `risk` is null when the
+risk was not asked or the call failed; `riskThreshold` is the threshold the
+decision was held to. Both are null for decisions made before the risk
+existed. The `draft.created` event carries `risk` and `riskThreshold` too.
+`draft` is null for `none` and when nothing
 was drafted (`draftErrorCode` says why drafting failed). `draft.digest` is the
 digest the reply or message route computes for the unedited text. A draft
 superseded after it was acknowledged comes back once more with
@@ -604,7 +639,7 @@ conversation supersedes the older ones there (it also names them in
 | Code | Refused when |
 | --- | --- |
 | `guard_draft` | The draft is not the tenant's, or answers another conversation or comment. |
-| `guard_decision` | The draft's decision is not `auto`. |
+| `guard_decision` | The draft's decision is not `auto`, or its stored risk score is missing or not strictly below the `riskThreshold` stored with it. |
 | `guard_settings` | The tenant's current settings do not have `enabled`, `drafts` and the kind on. |
 | `guard_revision` | The submission is not revision 1. |
 | `guard_digest` | The digest is not the draft's: the text was edited. |

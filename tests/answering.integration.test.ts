@@ -47,16 +47,20 @@ class FakePage implements PlatformAdapter {
   async sendMessage() { return { kind: 'sent' as const, externalId: 'sent-1' } }
 }
 
-/** Decides by keyword: "auto" is full, "thanks" none, anything else draft. */
+/** Decides by keyword: "auto" is full, "thanks" none, anything else draft; "risky" is high risk, anything else low. */
 class FakeDecision implements DecisionModel {
   calls: string[] = []
+  questions: string[][] = []
   async decide(input: Parameters<DecisionModel['decide']>[0]) {
     const text = (input.state.item as { text: string }).text
     this.calls.push(text)
+    this.questions.push(Object.keys(input.questions))
     const probabilities = text.includes('auto') ? { full: 0.95, draft: 0.04, none: 0.01 }
       : text.includes('thanks') ? { full: 0.02, draft: 0.08, none: 0.9 } : { full: 0.2, draft: 0.7, none: 0.1 }
     const choice = (Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0]![0]) as 'full' | 'draft' | 'none'
-    return { model: 'd1.1-test', choice, probabilities, confidence: 0.8, cost: 0.0001 }
+    const risk = text.includes('risky') ? { choice: 'high' as const, probabilities: { low: 0.05, medium: 0.15, high: 0.8 }, confidence: 0.7 }
+      : { choice: 'low' as const, probabilities: { low: 0.88, medium: 0.1, high: 0.02 }, confidence: 0.81 }
+    return { model: 'd1.1-test', ...input.questions.answer ? { answer: { choice, probabilities, confidence: 0.8 } } : {}, risk, cost: 0.0001 }
   }
 }
 
@@ -103,8 +107,8 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
   const advance = (ms: number) => { now = new Date(now.getTime() + ms) }
 
   const baseSettings = (overrides: Partial<AnsweringSettings> = {}): AnsweringSettings => ({ enabled: true, drafts: true, kinds: { messages: true, comments: true },
-    decisionModel: 'd1.1', decisionPrompt: 'Answer shipping questions.', decisionThreshold: 0.9, noneThreshold: 0.8, replyModel: 'haiku', voice: 'Friendly.',
-    replyContext: '', delaySeconds: 120, cases: [], ...overrides })
+    decisionModel: 'd1.1', decisionPrompt: 'Answer shipping questions.', decisionThreshold: 0.9, noneThreshold: 0.8, riskThreshold: 30, replyModel: 'haiku',
+    voice: 'Friendly.', replyContext: '', delaySeconds: 120, cases: [], ...overrides })
   const put = (overrides: Partial<AnsweringSettings> = {}, organizationId = org) =>
     putAnswering(context, organizationId, { version: ++version, settings: baseSettings(overrides), context: [{ id: 'e1', topic: 'shipping', body: 'Three days.' }] })
 
@@ -203,6 +207,7 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
       expect(outbox.items).toEqual([{ id: first!.id, organizationId: org, kind: 'message', channelId: page.id, conversationId: chat.id, responseId: null, jobId: null,
         inboundExternalId: first!.inboundExternalId,
         decision: { outcome: 'review', reason: 'below_threshold', model: 'd1.1-test', probabilities: { full: 0.2, draft: 0.7, none: 0.1 }, confidence: 0.8,
+          risk: { level: 'low', score: 7, probabilities: { low: 0.88, medium: 0.1, high: 0.02 }, confidence: 0.81 }, riskThreshold: 30,
           caseId: null, decisionThreshold: 0.9, noneThreshold: 0.8, cost: 0.0001, errorCode: null, settingsVersion: version },
         draft: { text: 'Reply: Do you ship to Spain?', digest: first!.draftDigest, model: 'claude-haiku-5-5', language: 'en', flags: [] },
         draftErrorCode: null, superseded: false, supersededBy: null, supersedes: [], createdAt: now.toISOString() }])
@@ -292,6 +297,19 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
     await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_settings' })
     await put()
     await refused({ ...automaticMessage(auto!), draftId: randomUUID() }).toMatchObject({ code: 'guard_draft' })
+    // The engine's stored risk decides, not the dashboard: a missing risk, or one at the stored threshold, is refused.
+    const stored = { riskLevel: auto!.riskLevel, riskScore: auto!.riskScore, riskProbabilities: auto!.riskProbabilities, riskConfidence: auto!.riskConfidence }
+    expect(auto).toMatchObject({ riskLevel: 'low', riskScore: 7, riskThreshold: 30 })
+    await db.update(inboundDrafts).set({ riskLevel: null, riskScore: null, riskProbabilities: null, riskConfidence: null }).where(eq(inboundDrafts.id, auto!.id))
+    await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
+    await db.update(inboundDrafts).set({ ...stored, riskThreshold: null }).where(eq(inboundDrafts.id, auto!.id))
+    await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
+    await db.update(inboundDrafts).set({ riskThreshold: 7 }).where(eq(inboundDrafts.id, auto!.id))
+    await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
+    // A higher threshold in today's settings does not lift the one stored with the decision.
+    await put({ riskThreshold: 100 })
+    await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
+    await db.update(inboundDrafts).set({ riskThreshold: 8 }).where(eq(inboundDrafts.id, auto!.id))
 
     const accepted = await submitMessage(context, org, automaticMessage(auto!))
     expect(accepted).toMatchObject({ created: true, message: { state: 'queued', approvedVia: 'automation', draftId: auto!.id } })
@@ -341,9 +359,64 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
     }
     await expect(submitReply(context, org, submission(sibling.externalId))).rejects.toMatchObject({ code: 'guard_draft' })
     await expect(submitReply(context, org, submission(asked.externalId, 'Edited'))).rejects.toMatchObject({ code: 'guard_digest' })
+    await db.update(inboundDrafts).set({ riskScore: 30, riskLevel: 'medium' }).where(eq(inboundDrafts.id, draft!.id))
+    await expect(submitReply(context, org, submission(asked.externalId))).rejects.toMatchObject({ code: 'guard_decision' })
+    await db.update(inboundDrafts).set({ riskScore: draft!.riskScore, riskLevel: draft!.riskLevel }).where(eq(inboundDrafts.id, draft!.id))
     expect(await submitReply(context, org, submission(asked.externalId))).toMatchObject({ created: true, reply: { approvedVia: 'automation', draftId: draft!.id } })
     await expect(submitReply(context, org, submission(asked.externalId))).rejects.toMatchObject({ code: 'guard_used' })
     expect(await db.select().from(replies)).toHaveLength(1)
+  })
+
+  it('assesses the risk of every DM and comment it decides, and keeps the risky ones for a person', async () => {
+    const page = await channel()
+    await put({ cases: [{ id: 'hours', effect: 'always', label: '', authors: [], keywords: ['opening hours'], channelIds: [] },
+      { id: 'press', effect: 'never', label: '', authors: [], keywords: ['journalist'], channelIds: [] }] })
+    advance(minute)
+    const risky = await conversation(page)
+    await message(risky, 'Please auto answer, it is risky')
+    const plain = await conversation(page)
+    await message(plain, 'Please auto answer')
+    const job = await post(page, day)
+    const always = await comment(job, 'What are your opening hours? risky')
+    const never = await comment(job, 'A journalist here')
+    expect(await runAnswering(context)).toEqual({ drafted: 4, failed: 0 })
+    // Both questions in one call where the answer is asked; the risk alone for the cases.
+    expect(decision.questions.toSorted()).toEqual([['answer', 'risk'], ['answer', 'risk'], ['risk'], ['risk']])
+    const [high] = await draftsOf(risky.id)
+    expect(high).toMatchObject({ outcome: 'review', reason: 'risk_above_threshold', probabilities: { full: 0.95 }, riskLevel: 'high', riskScore: 88,
+      riskProbabilities: { low: 0.05, medium: 0.15, high: 0.8 }, riskConfidence: 0.7, riskThreshold: 30, draftText: 'Reply: Please auto answer, it is risky' })
+    expect((await draftsOf(plain.id))[0]).toMatchObject({ outcome: 'auto', reason: 'above_threshold', riskLevel: 'low', riskScore: 7 })
+    const rows = await db.select().from(inboundDrafts)
+    expect(rows.find(row => row.responseId === always.id)).toMatchObject({ outcome: 'review', reason: 'risk_above_threshold', caseId: 'hours', riskScore: 88,
+      probabilities: null, decisionModel: 'd1.1-test' })
+    expect(rows.find(row => row.responseId === never.id)).toMatchObject({ outcome: 'review', reason: 'case_never', riskLevel: 'low', probabilities: null })
+    // The risk travels with the decision: in the event and in the outbox.
+    const created = await db.select().from(events).where(eq(events.kind, 'draft.created'))
+    expect(created.find(event => (event.detail as { draftId: string }).draftId === high!.id)!.detail).toMatchObject({ reason: 'risk_above_threshold',
+      risk: { level: 'high', score: 88, probabilities: { low: 0.05, medium: 0.15, high: 0.8 }, confidence: 0.7 }, riskThreshold: 30 })
+    expect((await listDraftOutbox(context, 10)).items.find(item => item.id === high!.id)!.decision).toMatchObject({ outcome: 'review',
+      reason: 'risk_above_threshold', risk: { level: 'high', score: 88 }, riskThreshold: 30 })
+    // A stricter threshold holds back the low-risk item too.
+    await put({ riskThreshold: 7 })
+    const next = await conversation(page)
+    await message(next, 'Please auto answer')
+    await runAnswering(context)
+    expect((await draftsOf(next.id))[0]).toMatchObject({ outcome: 'review', reason: 'risk_above_threshold', riskScore: 7, riskThreshold: 7 })
+  })
+
+  it('reads settings stored before the risk threshold existed with its default', async () => {
+    await put()
+    await fixture.migrator.query(`update answering_settings set settings = settings - 'riskThreshold' where organization_id = $1`, [org])
+    expect(await getAnswering(context, org)).toMatchObject({ version, settings: { riskThreshold: 30 } })
+    // The same push again, now carrying the default, is still the same push.
+    expect(await putAnswering(context, org, { version, settings: baseSettings(), context: [{ id: 'e1', topic: 'shipping', body: 'Three days.' }] }))
+      .toMatchObject({ version })
+    const page = await channel()
+    advance(minute)
+    const chat = await conversation(page)
+    await message(chat, 'Please auto answer')
+    await runAnswering(context)
+    expect((await draftsOf(chat.id))[0]).toMatchObject({ outcome: 'auto', riskThreshold: 30 })
   })
 
   it('keeps for a person a cleared item whose draft objects: flags, no answer needed, no text, too long', async () => {
@@ -509,7 +582,8 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
     await message(chat, 'Please auto answer')
     const bare = { ...context, decisionModel: undefined, draftModel: undefined }
     expect(await runAnswering(bare)).toEqual({ drafted: 1, failed: 0 })
-    expect((await draftsOf(chat.id))[0]).toMatchObject({ outcome: 'skipped', reason: 'no_decision_model', draftText: null })
+    expect((await draftsOf(chat.id))[0]).toMatchObject({ outcome: 'skipped', reason: 'no_decision_model', draftText: null, riskLevel: null, riskScore: null,
+      riskThreshold: 30 })
 
     const keep = await conversation(page)
     await message(keep, 'Another one')
