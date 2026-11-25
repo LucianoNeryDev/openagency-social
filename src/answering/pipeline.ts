@@ -9,7 +9,7 @@ import { queueControlEvent } from '../control-events.js'
 import { errorFields, log } from '../log.js'
 import { messageDigest, replyDigest } from '../digests.js'
 import { decide, type Decision, type DecisionItem } from './decision.js'
-import { lockAnswering } from './settings.js'
+import { lockAnswering, storedSettings } from './settings.js'
 import { DraftError, draftFits, draftFlags, draftLimits, tooLongFlag, type DraftInput, type DraftOutput, type HistoryMessage, type ThreadItem } from './drafting.js'
 
 // The answering step: decide, then draft, for inbound DMs and comments the
@@ -29,7 +29,7 @@ const messageWindowMs = dayMs
 /** At most this many ancestors of a comment are read. */
 const maxThreadDepth = 10
 
-type Tenant = typeof answeringSettings.$inferSelect
+type Tenant = Omit<typeof answeringSettings.$inferSelect, 'settings'> & { settings: AnsweringSettings }
 
 interface MessageCandidate {
   kind: 'message'
@@ -240,7 +240,8 @@ async function storeDraft(context: EngineContext, candidate: Candidate, drafted:
       organizationId: candidate.tenant.organizationId, channelId: candidate.channel.id, kind: candidate.kind, ...target,
       outcome: decision.outcome, reason: decision.reason, decisionModel: decision.model, probabilities: decision.probabilities,
       confidence: decision.confidence, caseId: decision.caseId, decisionThreshold: decision.decisionThreshold, noneThreshold: decision.noneThreshold,
-      cost: decision.cost, errorCode: decision.errorCode, draftText: draft?.text ?? null, draftDigest: digest, draftModel: draft?.model ?? null,
+      riskLevel: decision.risk?.level ?? null, riskScore: decision.risk?.score ?? null, riskProbabilities: decision.risk?.probabilities ?? null,
+      riskConfidence: decision.risk?.confidence ?? null, riskThreshold: decision.riskThreshold, cost: decision.cost, errorCode: decision.errorCode, draftText: draft?.text ?? null, draftDigest: digest, draftModel: draft?.model ?? null,
       draftLanguage: draft?.output.language.slice(0, 16) ?? null, draftFlags: drafted.flags, draftErrorCode: drafted.draftErrorCode,
       settingsVersion: candidate.tenant.version, outboxPending: true, outboxAt: now, createdAt: now,
     }).onConflictDoNothing().returning({ id: inboundDrafts.id })
@@ -253,7 +254,8 @@ async function storeDraft(context: EngineContext, candidate: Candidate, drafted:
     }
     await recordEvent(transaction, { organizationId: candidate.tenant.organizationId, kind: 'draft.created', channelId: candidate.channel.id,
       detail: { draftId: created.id, kind: candidate.kind, outcome: decision.outcome, reason: decision.reason, model: decision.model,
-        probabilities: decision.probabilities, confidence: decision.confidence, caseId: decision.caseId, cost: decision.cost,
+        probabilities: decision.probabilities, confidence: decision.confidence, risk: decision.risk, riskThreshold: decision.riskThreshold,
+        caseId: decision.caseId, cost: decision.cost,
         errorCode: decision.errorCode, drafted: Boolean(draft), draftModel: draft?.model ?? null, draftErrorCode: drafted.draftErrorCode,
         flags: drafted.flags, settingsVersion: candidate.tenant.version } })
     await queueControlEvent(transaction, 'drafts.available', candidate.tenant.organizationId, now)
@@ -265,7 +267,7 @@ async function storeDraft(context: EngineContext, candidate: Candidate, drafted:
 async function activeTenants(context: EngineContext): Promise<Tenant[]> {
   const rows = await context.db.select().from(answeringSettings)
     .where(or(isNotNull(answeringSettings.messagesEnabledAt), isNotNull(answeringSettings.commentsEnabledAt)))
-  return rows.filter(row => row.settings.drafts)
+  return rows.filter(row => row.settings.drafts).map(row => ({ ...row, settings: storedSettings(row.settings) }))
 }
 
 /** One pass: decide and draft up to `limit` new inbound items, oldest first, across tenants. */

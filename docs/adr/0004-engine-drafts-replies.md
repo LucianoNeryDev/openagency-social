@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-11-15
+- Amended 2026-11-25: a risk question gates automatic answers (see
+  [Amendment: risk gate](#amendment-risk-gate)).
 
 ## Context
 
@@ -75,3 +77,33 @@ approved.
 - **Draft inside the readers.** Simplest, but the code that reads untrusted
   content would hold model calls and be one step from sending; a crash or a
   slow model would also hold up reading.
+
+## Amendment: risk gate
+
+Added 2026-11-25. The control plane wants every inbound item to carry a risk
+level, and only items below a configured risk to be answered without a
+person.
+
+- **A second question in the same request.** Beside `answer`, the decision
+  request asks `risk` (`low`, `medium`, `high`): how risky it would be to
+  answer this item automatically, without a person checking the answer. The
+  item stays untrusted state. The risk score is
+  `round(100 × (0.5 × p(medium) + p(high)))`. One request keeps the cost and
+  the latency of one call; a missing or malformed answer to either question
+  fails the call, as before.
+- **Risk-only calls.** Where the engine did not ask before (a `never` or
+  `always` case, no policy), it now asks `risk` alone, so every decided item
+  has a risk level when a decision model is configured. This sends the text
+  of case-matched items to Liquid AI, which it did not before; tenants
+  without settings are still never sent anywhere.
+- **The gate.** `auto` needs a risk score strictly below the tenant's
+  `riskThreshold` (default 30), on every path including `always` cases;
+  otherwise the item is `review` (`risk_above_threshold`). An unknown risk
+  never clears: without `LIQUID_API_KEY` an `always` case no longer answers
+  on its own.
+- **The engine's record stays the authority.** The decision stores its risk
+  and the threshold it was held to; `guard_decision` refuses an automatic
+  send whose stored risk is missing or at or above that stored threshold, or
+  the tenant's current one when that is lower: a later, stricter threshold
+  applies at once, a looser one never lifts the stored one. Decisions stored before the change have no
+  risk and are refused.

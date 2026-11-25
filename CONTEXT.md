@@ -90,6 +90,9 @@ makes no approval decisions.
   `auto` (full: may be answered without a person), `review` (draft: a person
   checks), `none` (needs no answer) or `skipped` (not decided; a person
   decides), with the reason and the model's probabilities.
+- **Risk** — how risky answering an item without a person would be: a
+  **risk level** (`low`, `medium`, `high`, the model's choice) and a **risk
+  score** (0 to 100). `auto` needs a score below the **risk threshold**.
 - **Engine draft** — the answer the engine wrote for a decided item, with the
   digest its unedited submission would carry. A newer draft for the same
   conversation **supersedes** older ones. Drafts reach the dashboard through
