@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Risk gate for automatic answers ([ADR 0004](docs/adr/0004-engine-drafts-replies.md#amendment-risk-gate)):
+  the decision request also asks `risk` (`low`, `medium`, `high`) in the
+  same call, or alone for `never` and `always` cases and without a policy.
+  The risk score is `round(100 × (0.5 × p(medium) + p(high)))`. `auto` now
+  needs a score strictly below the new setting `riskThreshold` (0 to 100,
+  default 30), on every path; otherwise `review` with
+  `risk_above_threshold`. An unknown risk never clears, so an `always`
+  case without `LIQUID_API_KEY` goes to a person. Decisions keep `risk`
+  and `riskThreshold` (migration `0019`, nullable columns) and carry them
+  in the outbox and the `draft.created` event; `guard_decision` refuses an
+  automatic send whose stored risk is missing or at or above its stored
+  threshold, or the current one when lower.
+
 - WhatsApp fixes from the staging test: a connect now fails with a code that
   says why instead of connecting nothing silently: `no_whatsapp_account`
   (the grant names no business account, as with a Login for Business

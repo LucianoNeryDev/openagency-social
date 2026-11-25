@@ -134,6 +134,13 @@
       "when": 1795522008347,
       "tag": "0018_outgoing_error_detail",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795601551620,
+      "tag": "0019_risk_gate",
+      "breakpoints": true
     }
   ]
 }

@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { clock, recordEvent, type EngineContext } from '../context.js'
 import type { Executor } from '../db/client.js'
-import { answeringSettings, caseEffects, replyModelChoices, type AnsweringContextEntry, type AnsweringSettings } from '../db/schema.js'
+import { answeringSettings, caseEffects, replyModelChoices, type AnsweringContextEntry, type AnsweringSettings, type StoredAnsweringSettings } from '../db/schema.js'
 import { conflict, notFound } from '../errors.js'
 import { advisoryLock } from '../exactly-once.js'
 
@@ -12,6 +12,8 @@ const author = z.string().max(200).transform(value => value.trim().replace(/^@/,
 
 /** The engine never sends an automatic answer sooner than this after its draft, whatever the settings say. */
 export const minAutoDelaySeconds = 60
+/** The risk threshold when the dashboard sends none, and for settings stored before it existed. */
+export const defaultRiskThreshold = 30
 
 /** One case of answering; at least one condition (authors or keywords) is set. */
 export const answeringCaseSchema = z.strictObject({
@@ -36,6 +38,7 @@ export const answeringSettingsSchema = z.strictObject({
   decisionPrompt: text(4_000),
   decisionThreshold: z.number().min(0.5).max(1),
   noneThreshold: z.number().min(0.5).max(1).default(0.8),
+  riskThreshold: z.number().int().min(0).max(100).default(defaultRiskThreshold),
   replyModel: z.enum(replyModelChoices).default('haiku'),
   voice: text(2_000),
   replyContext: text(8_000).default(''),
@@ -80,9 +83,14 @@ function canonical(value: unknown): string {
   return JSON.stringify(value)
 }
 
+/** Stored settings with the defaults of fields added since they were pushed. */
+export function storedSettings(settings: StoredAnsweringSettings): AnsweringSettings {
+  return { ...settings, riskThreshold: settings.riskThreshold ?? defaultRiskThreshold }
+}
+
 export async function readAnswering(executor: Executor, organizationId: string): Promise<StoredAnswering | null> {
   const [row] = await executor.select().from(answeringSettings).where(eq(answeringSettings.organizationId, organizationId)).limit(1)
-  return row ?? null
+  return row ? { ...row, settings: storedSettings(row.settings) } : null
 }
 
 function answeringView(row: StoredAnswering) {
@@ -127,6 +135,6 @@ export async function putAnswering(context: EngineContext, organizationId: strin
       .onConflictDoUpdate({ target: answeringSettings.organizationId, set: values }).returning()
     await recordEvent(transaction, { organizationId, kind: 'answering.updated', detail: { version: input.version, enabled: input.settings.enabled,
       drafts: input.settings.drafts, kinds: input.settings.kinds, contextEntries: input.context.length } })
-    return answeringView(stored!)
+    return answeringView({ ...stored!, settings: storedSettings(stored!.settings) })
   })
 }
