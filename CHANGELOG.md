@@ -13,7 +13,7 @@
   and `riskThreshold` (migration `0019`, nullable columns) and carry them
   in the outbox and the `draft.created` event; `guard_decision` refuses an
   automatic send whose stored risk is missing or at or above its stored
-  threshold.
+  threshold, or the current one when lower.
 
 - WhatsApp fixes from the staging test: a connect now fails with a code that
   says why instead of connecting nothing silently: `no_whatsapp_account`

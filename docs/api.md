@@ -639,7 +639,7 @@ conversation supersedes the older ones there (it also names them in
 | Code | Refused when |
 | --- | --- |
 | `guard_draft` | The draft is not the tenant's, or answers another conversation or comment. |
-| `guard_decision` | The draft's decision is not `auto`, or its stored risk score is missing or not strictly below the `riskThreshold` stored with it. |
+| `guard_decision` | The draft's decision is not `auto`, or its stored risk score is missing, or not strictly below the `riskThreshold` stored with it or the tenant's current one, whichever is lower. |
 | `guard_settings` | The tenant's current settings do not have `enabled`, `drafts` and the kind on. |
 | `guard_revision` | The submission is not revision 1. |
 | `guard_digest` | The digest is not the draft's: the text was edited. |

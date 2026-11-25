@@ -114,7 +114,7 @@ export type AutomationTarget =
  * Refuses an automatic send (`409 guard_<name>`) unless the engine's own
  * records allow it: the draft is the tenant's, of this kind and target; its
  * decision is `auto` with a stored risk score strictly below the risk
- * threshold stored with it; the tenant's current settings have automatic sending
+ * threshold stored with it and below the tenant's current one; the tenant's current settings have automatic sending
  * and the kind on; the submission is revision 1 with the draft's digest
  * (unedited); the draft is not superseded; `sendAt` is at least the delay
  * (never under 60 s) after the draft; and no automatic send used it yet.
@@ -134,10 +134,11 @@ export async function checkAutomation(executor: Executor, organizationId: string
     if (!response || response.jobId !== input.jobId || response.externalId !== input.parentExternalId) throw refuse('guard_draft', 'The draft answers another comment')
   }
   if (draft.outcome !== 'auto') throw refuse('guard_decision', 'The engine did not clear this item for an automatic answer')
-  // The stored risk, against the threshold stored with it: a decision without both never goes out unseen.
-  if (!riskClears(draft.riskScore, draft.riskThreshold)) throw refuse('guard_decision', 'The item\'s stored risk does not allow an automatic answer')
   const answering = await readAnswering(executor, organizationId)
   const settings = answering?.settings
+  // The stored risk, against the threshold stored with it (or today's, when lower): a decision without both never goes out unseen.
+  const threshold = draft.riskThreshold === null ? null : Math.min(draft.riskThreshold, settings?.riskThreshold ?? draft.riskThreshold)
+  if (!riskClears(draft.riskScore, threshold)) throw refuse('guard_decision', 'The item\'s stored risk does not allow an automatic answer')
   if (!settings?.enabled || !settings.drafts || !settings.kinds[input.kind === 'message' ? 'messages' : 'comments']) {
     throw refuse('guard_settings', 'Automatic answering is off for this tenant or this kind')
   }

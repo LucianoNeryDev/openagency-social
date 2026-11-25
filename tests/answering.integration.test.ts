@@ -306,10 +306,13 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
     await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
     await db.update(inboundDrafts).set({ riskThreshold: 7 }).where(eq(inboundDrafts.id, auto!.id))
     await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
-    // A higher threshold in today's settings does not lift the one stored with the decision.
+    // A higher threshold in today's settings does not lift the one stored with the decision; a lower one applies.
     await put({ riskThreshold: 100 })
     await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
-    await db.update(inboundDrafts).set({ riskThreshold: 8 }).where(eq(inboundDrafts.id, auto!.id))
+    await db.update(inboundDrafts).set({ riskThreshold: 30 }).where(eq(inboundDrafts.id, auto!.id))
+    await put({ riskThreshold: 7 })
+    await refused(automaticMessage(auto!)).toMatchObject({ code: 'guard_decision' })
+    await put()
 
     const accepted = await submitMessage(context, org, automaticMessage(auto!))
     expect(accepted).toMatchObject({ created: true, message: { state: 'queued', approvedVia: 'automation', draftId: auto!.id } })

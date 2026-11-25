@@ -103,6 +103,7 @@ person.
   on its own.
 - **The engine's record stays the authority.** The decision stores its risk
   and the threshold it was held to; `guard_decision` refuses an automatic
-  send whose stored risk is missing or at or above that stored threshold,
-  whatever the settings say now. Decisions stored before the change have no
+  send whose stored risk is missing or at or above that stored threshold, or
+  the tenant's current one when that is lower: a later, stricter threshold
+  applies at once, a looser one never lifts the stored one. Decisions stored before the change have no
   risk and are refused.
