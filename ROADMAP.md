@@ -8,6 +8,7 @@ Updated 2026-11-26.
 
 ## Done
 
+- Worker lanes: video posts and browser jobs have their own slots.
 - Revoked logins found before a post is due: a daily token check per
   channel, and background reads that mark a refused token `needs_reauth`.
 - Publishing to Facebook Pages, Instagram (images, carousels and reels,
@@ -53,8 +54,6 @@ Updated 2026-11-26.
   change, so Portal reads them at once instead of on its schedule.
 
 - Publishing that agencies can rely on:
-  - Their own worker slots for video and browser jobs, so a few reels or a
-    browser session cannot hold other posts past the one-hour lateness limit.
   - A failed media download by Instagram retried instead of rejected;
     `PUBLIC_MEDIA_URL` checked at start and on submit; a browser job without a
     runner configured fails instead of turning uncertain.

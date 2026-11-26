@@ -563,6 +563,26 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
     })
   })
 
+  describe('worker lanes', () => {
+    it('gives video and browser jobs their own slots, so they cannot hold standard posts back', async () => {
+      const [page] = await connect()
+      const stored = await storeMedia(context, org, 'clip.mp4', 'video/mp4', Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), randomBytes(64)]))
+      const reel = submission([page!.id], { mediaIds: [stored.id] })
+      const photo = submission([page!.id], { publishAt: new Date(now.getTime() + 61 * 60_000).toISOString() })
+      await submitJobs(context, reel)
+      await submitJobs(context, photo)
+      expect((await listJobs(context, org, reel.postId)).jobs[0]).toBeDefined()
+      const [reelJob] = await db.select().from(jobs).where(eq(jobs.postId, reel.postId))
+      const [photoJob] = await db.select().from(jobs).where(eq(jobs.postId, photo.postId))
+      expect([reelJob!.lane, photoJob!.lane]).toEqual(['video', 'standard'])
+      advance(62 * 60_000)
+      // The video slot is full: only a standard job can be claimed, though the reel is older.
+      expect(await claimNext(context, ['standard'])).toMatchObject({ jobId: photoJob!.id, lane: 'standard' })
+      expect(await claimNext(context, ['standard'])).toBeNull()
+      expect(await claimNext(context, ['video'])).toMatchObject({ jobId: reelJob!.id, lane: 'video' })
+    })
+  })
+
   describe('token check', () => {
     it('proves each token once a day and marks a refused one needs_reauth before a post is due', async () => {
       const [first, second] = await connect(['Bottega', 'Forno'])

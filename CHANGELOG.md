@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Worker lanes: each job gets a lane at submit (`standard`, `video` for any
+  MP4, `browser` for browser channels; migration `0022` adds `jobs.lane` and
+  sets it for queued and running jobs), and each lane has its own slots
+  (`WORKER_CONCURRENCY` for standard posts, `WORKER_VIDEO_SLOTS` and
+  `WORKER_BROWSER_SLOTS`, default 1 each), so a few reels or a browser
+  session cannot hold photo posts past the one-hour lateness limit.
 - Revoked logins found before a post is due: a daily token check reads each
   connected OAuth channel once (`checkCredential`: the Page or account ID on
   Meta, `/me` on Instagram's login, the number on WhatsApp, `channels.list`

@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm'
 import { lockControls, readPublishing } from '../channels.js'
 import { adapterFor, clock, recordEvent, type EngineContext } from '../context.js'
-import { attempts, channels, jobs, oauthStates, type JobState } from '../db/schema.js'
+import { attempts, channels, jobLanes, jobs, oauthStates, type JobLane, type JobState } from '../db/schema.js'
 import { channelDriver } from './driver.js'
 import { refreshIdleCredentials, TransientCredentialError } from '../credentials.js'
 import { errorFields, log } from '../log.js'
@@ -33,6 +33,14 @@ export interface ClaimedJob {
   jobId: string
   attemptId: string
   organizationId: string
+  lane?: JobLane
+}
+
+export interface LaneSlots {
+  /** Standard posts: photos, text, links. */
+  standard: number
+  video: number
+  browser: number
 }
 
 /**
@@ -40,12 +48,13 @@ export interface ClaimedJob {
  * lock that pause updates take, and the claim commits before any platform
  * call, so a crash leaves an open attempt for the sweeper.
  */
-export async function claimNext(context: EngineContext): Promise<ClaimedJob | null> {
+export async function claimNext(context: EngineContext, lanes: readonly JobLane[] = jobLanes): Promise<ClaimedJob | null> {
+  if (!lanes.length) return null
   for (let skipped = 0; skipped < 50; skipped++) {
     const result = await context.db.transaction(async transaction => {
       const now = clock(context)
       const [job] = await transaction.select().from(jobs)
-        .where(and(eq(jobs.state, 'queued'), lte(jobs.notBefore, now)))
+        .where(and(eq(jobs.state, 'queued'), lte(jobs.notBefore, now), inArray(jobs.lane, [...lanes])))
         .orderBy(asc(jobs.notBefore)).limit(1).for('update', { skipLocked: true })
       if (!job) return null
       await lockControls(transaction, job.organizationId)
@@ -65,7 +74,7 @@ export async function claimNext(context: EngineContext): Promise<ClaimedJob | nu
       const [attempt] = await transaction.insert(attempts).values({ jobId: job.id, startedAt: now }).returning({ id: attempts.id })
       await transaction.update(jobs).set({ state: 'running', attemptCount: job.attemptCount + 1, updatedAt: now }).where(eq(jobs.id, job.id))
       await recordEvent(transaction, { organizationId: job.organizationId, kind: 'job.running', jobId: job.id, channelId: job.channelId, detail: { attempt: job.attemptCount + 1 } })
-      return { jobId: job.id, attemptId: attempt!.id, organizationId: job.organizationId }
+      return { jobId: job.id, attemptId: attempt!.id, organizationId: job.organizationId, lane: job.lane }
     })
     if (result !== 'skipped') return result
   }
@@ -269,7 +278,19 @@ export class Worker {
   // Post, account and comment reads share about 60 platform calls a minute; each request spends one.
   private readonly budget = new CallBudget()
 
-  constructor(private readonly context: EngineContext, private readonly options: { concurrency: number, pollMs: number }) {}
+  constructor(private readonly context: EngineContext, private readonly options: { concurrency: number, pollMs: number, slots?: Partial<LaneSlots> }) {}
+
+  /** Slots per lane: standard posts take `concurrency`, videos and browser jobs one each unless set. */
+  private slots(): LaneSlots {
+    return { standard: this.options.concurrency, video: 1, browser: 1, ...this.options.slots }
+  }
+
+  private freeLanes(): JobLane[] {
+    const slots = this.slots()
+    const busy = new Map<JobLane, number>()
+    for (const claimed of this.running.values()) busy.set(claimed.lane ?? 'standard', (busy.get(claimed.lane ?? 'standard') ?? 0) + 1)
+    return jobLanes.filter(lane => (busy.get(lane) ?? 0) < slots[lane])
+  }
 
   start() {
     this.enabled = true
@@ -389,8 +410,10 @@ export class Worker {
           .catch(error => log('error', 'retention pass failed', errorFields(error)))
           .finally(() => { this.retention = undefined })
       }
-      while (!this.stopping && this.running.size < this.options.concurrency) {
-        const claimed = await claimNext(this.context)
+      while (!this.stopping) {
+        const lanes = this.freeLanes()
+        if (!lanes.length) break
+        const claimed = await claimNext(this.context, lanes)
         if (!claimed) break
         const task = executeClaimed(this.context, claimed)
           .then(outcome => log(outcome.kind === 'published' || outcome === interrupted ? 'info' : outcome.kind === 'uncertain' ? 'error' : 'warn',
