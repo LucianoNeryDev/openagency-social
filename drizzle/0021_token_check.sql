@@ -1,0 +1,1 @@
+ALTER TABLE "channels" ADD COLUMN "token_checked_at" timestamp with time zone;

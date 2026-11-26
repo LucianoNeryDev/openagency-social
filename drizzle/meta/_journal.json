@@ -148,6 +148,13 @@
       "when": 1795717606635,
       "tag": "0020_deploy_safe_publishing",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1795720460307,
+      "tag": "0021_token_check",
+      "breakpoints": true
     }
   ]
 }

@@ -9,10 +9,11 @@ import {
 import { notFound } from './errors.js'
 import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
-import { RateLimited, type PlatformAdapter, type PlatformConversation, type PlatformMessage } from './platforms/types.js'
+import { RateLimited, ReauthRequired, type PlatformAdapter, type PlatformConversation, type PlatformMessage } from './platforms/types.js'
 import { decodeCursor, encodeCursor, responseRetryDelayMs } from './responses.js'
 import { messagesRetentionMs } from './retention.js'
 import { emitWebhookEvents } from './webhooks.js'
+import { markNeedsReauth } from './token-check.js'
 
 // Direct messages, read side. The content read here is untrusted:
 // this module stores it and makes channels due, and holds no sending code.
@@ -183,7 +184,7 @@ async function syncChannel(context: EngineContext, channel: Channel, announceSin
     try {
       messages = await adapter.conversationMessages(app, { channel: target, token, conversationExternalId: conversation.externalId })
     } catch (error) {
-      if (error instanceof RateLimited) throw error
+      if (error instanceof RateLimited || error instanceof ReauthRequired) throw error
       // One conversation that cannot be read does not hold up the others; it is tried on the next sync.
       log('warn', 'conversation read failed', { channelId: channel.id, ...errorFields(error) })
       continue
@@ -254,6 +255,7 @@ export async function collectDueConversations(context: EngineContext, budget?: C
         log('warn', 'conversations rate limited', { channelId: channel.id, until: until.toISOString() })
         continue
       }
+      if (error instanceof ReauthRequired) await markNeedsReauth(context, channel, 'read_refused')
       const failures = check.failureCount + 1
       await save({ failureCount: failures, lastError: (error instanceof Error ? error.message : 'Reading conversations failed').slice(0, 500),
         nextCheckAt: new Date(finished.getTime() + responseRetryDelayMs(failures)) })

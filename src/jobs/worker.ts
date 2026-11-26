@@ -14,6 +14,7 @@ import { repliesIntervalMs, runReplies, sweepReplies } from '../replies.js'
 import { collectDueConversations, conversationsIntervalMs } from '../conversations.js'
 import { messagesIntervalMs, runMessages, sweepMessages } from '../messages.js'
 import { applyRetention, retentionIntervalMs } from '../retention.js'
+import { checkDueTokens, tokenCheckIntervalMs } from '../token-check.js'
 import { answeringIntervalMs, runAnswering } from '../answering/pipeline.js'
 import { AttemptClosedError, type PublishOutcome } from '../platforms/types.js'
 import { changeChannelStatus, deliverDueWebhooks, emitJobOutcome, webhooksIntervalMs } from '../webhooks.js'
@@ -249,6 +250,7 @@ export class Worker {
   private lastRetention = 0
   private lastWebhooks = 0
   private lastAnswering = 0
+  private lastTokenCheck = 0
   // Collectors run beside publishing, never in its way: one pass of each at a time, outside the job slots.
   private metrics: Promise<void> | undefined
   private responses: Promise<void> | undefined
@@ -262,6 +264,8 @@ export class Worker {
   private webhooks: Promise<void> | undefined
   // AI answers: decides and drafts what the readers stored, after they committed. Holds no reading or sending code.
   private answering: Promise<void> | undefined
+  // The daily token check: one cheap read per channel, from the shared read budget.
+  private tokenCheck: Promise<void> | undefined
   // Post, account and comment reads share about 60 platform calls a minute; each request spends one.
   private readonly budget = new CallBudget()
 
@@ -287,7 +291,7 @@ export class Worker {
   async stop(graceMs = 25_000) {
     this.stopping = true
     clearInterval(this.timer)
-    const background = [this.metrics, this.responses, this.replies, this.conversations, this.messages, this.retention, this.webhooks, this.answering]
+    const background = [this.metrics, this.responses, this.replies, this.conversations, this.messages, this.retention, this.webhooks, this.answering, this.tokenCheck]
     const settled = (ms: number) => Promise.race([
       Promise.allSettled([...this.running.keys(), ...background]).then(() => true),
       new Promise<false>(resolve => setTimeout(() => resolve(false), ms).unref()),
@@ -369,6 +373,13 @@ export class Worker {
           .then(result => { if (result.drafted || result.failed) log('info', 'inbound items decided', result) })
           .catch(error => log('error', 'answering pass failed', errorFields(error)))
           .finally(() => { this.answering = undefined })
+      }
+      if (!this.tokenCheck && Date.now() - this.lastTokenCheck >= tokenCheckIntervalMs) {
+        this.lastTokenCheck = Date.now()
+        this.tokenCheck = checkDueTokens(this.context, this.budget)
+          .then(result => { if (result.refused || result.failed) log('info', 'tokens checked', result) })
+          .catch(error => log('error', 'token check pass failed', errorFields(error)))
+          .finally(() => { this.tokenCheck = undefined })
       }
       if (!this.retention && Date.now() - this.lastRetention >= retentionIntervalMs) {
         this.lastRetention = Date.now()
