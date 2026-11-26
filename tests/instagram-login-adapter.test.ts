@@ -82,6 +82,30 @@ describe('Instagram login refresh', () => {
 })
 
 describe('Instagram reels', () => {
+  it('refuses on submit a reel Instagram would refuse after processing it', () => {
+    const { adapter } = instagram([])
+    const reel = (details: Partial<MediaInfo>) => [{ ...info('video/mp4'), durationMs: 20_000, videoCodec: 'avc1', audioCodec: 'mp4a', ...details }]
+    const code = (details: Partial<MediaInfo>) => {
+      try {
+        adapter.validateSettings('instagram_account', {}, reel(details))
+        return 'ok'
+      } catch (error) {
+        return (error as { code?: string }).code
+      }
+    }
+    expect(code({})).toBe('ok')
+    expect(code({ videoCodec: 'hvc1', audioCodec: null })).toBe('ok')
+    expect(code({ durationMs: 2_900 })).toBe('video_too_short')
+    expect(code({ durationMs: 15 * 60_000 + 1 })).toBe('video_too_long')
+    expect(code({ sizeBytes: 301 * 1024 * 1024 })).toBe('video_too_large')
+    expect(code({ videoCodec: 'av01' })).toBe('unsupported_codec')
+    expect(code({ videoCodec: null })).toBe('unsupported_codec')
+    expect(code({ audioCodec: 'Opus' })).toBe('unsupported_codec')
+    // Stored before details were read: only the size is known.
+    expect(code({ durationMs: null, videoCodec: null, audioCodec: null })).toBe('ok')
+    expect(code({ durationMs: undefined, videoCodec: undefined, sizeBytes: 400 * 1024 * 1024 })).toBe('video_too_large')
+  })
+
   it('accepts one video with an optional JPEG cover, and reel settings only with a video', () => {
     const { adapter } = instagram([])
     expect(() => adapter.validateSettings('instagram_account', {}, [info('video/mp4')])).not.toThrow()

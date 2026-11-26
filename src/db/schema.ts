@@ -123,9 +123,13 @@ export const media = pgTable('media', {
   mimeType: text('mime_type').notNull(),
   sizeBytes: integer('size_bytes').notNull(),
   sha256: text('sha256').notNull(),
-  // Pixel size read from the file header; null for images stored before it was recorded.
+  // Pixel size read from the file header (a video's display size, after its rotation); null for files stored before it was recorded.
   width: integer('width'),
   height: integer('height'),
+  // A video's length and codecs from its MP4 boxes (src/mp4.ts); null for files stored before they were read, or that do not say.
+  durationMs: integer('duration_ms'),
+  videoCodec: text('video_codec'),
+  audioCodec: text('audio_codec'),
   // Files stored before media_chunks keep their bytes here; newer ones leave it null.
   data: bytea('data'),
   createdAt: createdAt(),

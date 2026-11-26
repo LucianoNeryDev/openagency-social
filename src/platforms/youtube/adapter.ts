@@ -11,6 +11,7 @@ import {
 } from '../types.js'
 import { pickOwnReply, type ReplyCandidate } from '../reply-match.js'
 import { GoogleClient, GoogleError } from './google.js'
+import { checkVideo, h264, hevc, type VideoRules } from '../video.js'
 import { activityPostsPerRead, clipText } from '../activity.js'
 
 /** `youtube.force-ssl` lets the channel reply to comments. */
@@ -20,6 +21,20 @@ export const defaultYoutubeScopes = ['https://www.googleapis.com/auth/youtube.up
 const api = 'https://www.googleapis.com/youtube/v3'
 const tokenUrl = 'https://oauth2.googleapis.com/token'
 const uploadUrl = 'https://www.googleapis.com/upload/youtube/v3/videos'
+/**
+ * YouTube takes uploads up to 256 GB or 12 hours (https://support.google.com/youtube/answer/71673;
+ * the engine stores at most 1 GB) and recommends H.264 in MP4
+ * (https://support.google.com/youtube/answer/1722171, read 2026-11-26). Any
+ * common codec is processed: H.264, HEVC, AV1, VP9 and VP8, MPEG-4 Part 2 and
+ * ProRes; the sound track is not checked. A square or vertical video up to
+ * three minutes becomes a Short (https://support.google.com/youtube/answer/15424877);
+ * a longer one is an ordinary video. Channels that are not verified are held
+ * to 15 minutes, which the API does not tell before the upload.
+ */
+export const youtubeVideoRules: VideoRules = {
+  platform: 'YouTube', maxBytes: 256 * 1024 ** 3, maxMs: 12 * 3_600_000,
+  videoCodecs: new Set([...h264, ...hevc, 'av01', 'vp09', 'vp08', 'mp4v', 'apch', 'apcn', 'apcs', 'apco', 'ap4h', 'ap4x']),
+}
 /** YouTube rejects angle brackets in titles and descriptions. */
 const plain = (value: string) => !/[<>]/.test(value)
 
@@ -166,6 +181,7 @@ export class YoutubeAdapter implements PlatformAdapter {
     if (!media.length || media[0]!.mimeType !== 'video/mp4' || media.length > 2 || (media[1] && media[1].mimeType === 'video/mp4')) {
       throw invalid('unsupported_media', 'A YouTube post is one MP4 video, optionally followed by a JPEG or PNG thumbnail')
     }
+    checkVideo(media[0]!, youtubeVideoRules)
     if (media[1] && media[1].sizeBytes > maxThumbnailBytes) throw invalid('unsupported_media', 'YouTube thumbnails may be up to 2 MB')
     if (content !== undefined && (!plain(content) || Buffer.byteLength(content) > 5_000)) {
       throw invalid('content_too_long', 'YouTube descriptions are up to 5,000 bytes, without < or >')

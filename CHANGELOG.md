@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Videos checked on submit: an MP4's `moov` box is read as the upload
+  arrives (`mvhd` duration, the video track's display size after rotation
+  and its codec, the sound track's codec), stored on `media` (migration
+  `0023`, nullable `duration_ms`, `video_codec`, `audio_codec`) and
+  returned by the upload. Submit refuses an Instagram reel that is not
+  H.264 or HEVC with AAC, shorter than 3 seconds, longer than 15 minutes or
+  over 300 MB, and a YouTube video without a video track, in an uncommon
+  codec or over 12 hours, with `video_too_large`, `video_too_short`,
+  `video_too_long` or `unsupported_codec`. Videos stored before are checked
+  for size only.
 - Rate limits: the Graph client reads Meta's `X-App-Usage` and
   `X-Business-Use-Case-Usage` headers on every answer. A background read
   (post and account numbers, comments, account activity) that sees any

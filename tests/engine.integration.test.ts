@@ -33,6 +33,7 @@ import { openSecret, runnerKeyPair } from '../src/crypto/sealed.js'
 import { checkBrowserLogin, linkBrowserChannel, listBrowserAccounts, putBrowserAccount } from '../src/vault.js'
 import type { RunnerClient } from '../src/platforms/browser/runner-client.js'
 import { postgresFixture } from './fixtures/postgres.js'
+import { mp4 } from './fixtures/mp4.js'
 import { createWebhook, deleteWebhook, deliverDueWebhooks, deliveryRetryDelaysMs, listDeliveries, listWebhooks, maxDeliveryAttempts, redeliver,
   rotateWebhookSecret, testWebhook, updateWebhook } from '../src/webhooks.js'
 import { signWebhook, type WebhookRequest, type WebhookResult } from '../src/webhook-sender.js'
@@ -263,6 +264,19 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(row).toEqual({ data: null, sha256: createHash('sha256').update(whole).digest('hex') })
     })
 
+    it('reads a video\'s length and codecs at upload, even with moov after a chunk of media data, and hands them to submit checks', async () => {
+      const whole = mp4({ moovLast: true, mdatBytes: mediaChunkBytes + 1_000, durationMs: 95_000, width: 1920, height: 1080, rotate: true, videoCodec: 'hvc1' })
+      const stored = await storeMedia(context, org, 'reel.mp4', 'video/mp4', pieces(whole.subarray(0, 100), whole.subarray(100, mediaChunkBytes + 7), whole.subarray(mediaChunkBytes + 7)))
+      expect(stored).toMatchObject({ width: 1080, height: 1920, durationMs: 95_000, videoCodec: 'hvc1', audioCodec: 'mp4a' })
+      const [channel] = await connect()
+      await submitJobs(context, submission([channel!.id], { mediaIds: [stored.id] }))
+      expect(adapter.validated[0]).toEqual([{ id: stored.id, mimeType: 'video/mp4', sizeBytes: whole.length, width: 1080, height: 1920,
+        durationMs: 95_000, videoCodec: 'hvc1', audioCodec: 'mp4a' }])
+      // A file that does not say keeps nulls, and is let through.
+      const unknown = await storeMedia(context, org, 'odd.mp4', 'video/mp4', Buffer.concat([mp4Head, randomBytes(64)]))
+      expect(unknown).toMatchObject({ durationMs: null, videoCodec: null, audioCodec: null })
+    })
+
     it('keeps nothing of an upload that is refused or breaks part way', async () => {
       const before = (await db.select({ id: media.id }).from(media)).length
       await expect(storeMedia(context, org, 'a.mp4', 'video/mp4', Buffer.from('not a video at all'))).rejects.toMatchObject({ code: 'invalid_media' })
@@ -318,7 +332,7 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       context.publicMedia = { baseUrl: 'https://dash-api.example.com/api/social/media', key, lifetimeMs: 3_600_000 }
       const input = submission([channel!.id], { mediaIds: [image.id] })
       await submitJobs(context, input)
-      expect(adapter.validated).toEqual([[{ id: image.id, mimeType: 'image/png', sizeBytes: 40, width: 1080, height: 1350 }]])
+      expect(adapter.validated).toEqual([[{ id: image.id, mimeType: 'image/png', sizeBytes: 40, width: 1080, height: 1350, durationMs: null, videoCodec: null, audioCodec: null }]])
       advance(60 * 60_000)
       expect(await runDue()).toMatchObject({ kind: 'published' })
       const url = new URL(adapter.published[0]!.media[0]!.publicUrl!)

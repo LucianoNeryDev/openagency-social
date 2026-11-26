@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { invalid } from '../../errors.js'
 import type { MediaInfo, PublishInput, PublishOutcome, ReconcileInput, ReconcileOutcome } from '../types.js'
+import { checkVideo, h264, hevc, type VideoRules } from '../video.js'
 import { classify } from './classify.js'
 import { GraphError, type GraphCall, type GraphClient } from './graph.js'
 
@@ -21,6 +22,17 @@ const reelSettingsSchema = z.strictObject({
 /** Instagram's limits for API-published feed images. */
 const maxImageBytes = 8 * 1024 * 1024
 const imageRatio = { min: 4 / 5, max: 1.91 }
+/**
+ * Reels through the Content Publishing API: MP4 or MOV, H.264 or HEVC video,
+ * AAC audio, 3 seconds to 15 minutes, at most 300 MB ("Reel specifications",
+ * https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media#reel-specifications,
+ * read 2026-11-26). The same page asks for at most 1920 columns, 23 to 60 FPS
+ * and recommends 9:16; those are left to Instagram.
+ */
+export const reelRules: VideoRules = {
+  platform: 'Instagram', maxBytes: 300 * 1024 * 1024, minMs: 3_000, maxMs: 15 * 60_000,
+  videoCodecs: new Set([...h264, ...hevc]), audioCodecs: new Set(['mp4a']),
+}
 
 export interface ContainerPoll {
   intervalMs: number
@@ -51,6 +63,7 @@ export function validateInstagram(settings: Record<string, unknown>, media: Medi
       throw invalid('unsupported_media', 'An Instagram reel is one MP4 video, optionally followed by one JPEG cover')
     }
     if (!reelSettingsSchema.safeParse(settings).success) throw invalid('invalid_settings', 'Instagram reels take only shareToFeed and thumbOffsetMs')
+    checkVideo(media[0]!, reelRules)
     if (media[1] && media[1].sizeBytes > maxImageBytes) throw invalid('unsupported_media', 'Instagram accepts JPEG images up to 8 MB')
     return
   }

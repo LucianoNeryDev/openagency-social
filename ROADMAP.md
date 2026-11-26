@@ -8,6 +8,8 @@ Updated 2026-11-26.
 
 ## Done
 
+- Videos checked on submit: length, codecs and size read from the MP4 at
+  upload, and refused for Instagram reels and YouTube before any processing.
 - Rate limits: Meta's usage headers read, so reads pause before Meta
   refuses them; rate-limited publishes retried when the limit lifts; and
   publishing holds a job back while its channel or app is paused.
@@ -63,8 +65,6 @@ Updated 2026-11-26.
   change, so Portal reads them at once instead of on its schedule.
 
 - Publishing that agencies can rely on:
-  - Videos checked on submit (size, duration, codec) instead of failing
-    after minutes of processing.
   - Posts cancelled by a pause can be brought back when it is lifted.
   - Reconcile that finds a post without an exact caption match, and hidden
     Facebook posts; photos not uploaded again on each retry; longer timeouts

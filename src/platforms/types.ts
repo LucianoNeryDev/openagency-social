@@ -80,6 +80,15 @@ export interface MediaInfo {
   sizeBytes: number
   width: number | null
   height: number | null
+  /**
+   * A video's length and codecs, read at upload. Null (or absent) for files
+   * stored before they were read, or that do not say: those are let through.
+   */
+  durationMs?: number | null
+  /** The video track's codec: `avc1` (H.264), `hvc1` or `hev1` (HEVC), `av01`, `vp09`, …; null without one. */
+  videoCodec?: string | null
+  /** The sound track's codec: `mp4a` (AAC), `Opus`, …; null without one. */
+  audioCodec?: string | null
 }
 
 export interface BrowserAccountTarget {

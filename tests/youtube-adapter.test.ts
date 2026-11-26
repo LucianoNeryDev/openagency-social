@@ -93,6 +93,20 @@ describe('YouTube token refresh', () => {
 
 describe('YouTube validation', () => {
   const { adapter } = fakeGoogle([])
+  it('takes any common codec, refuses a video without a video track or longer than 12 hours', () => {
+    const settings = { title: 'Episodio 19' }
+    const video = (details: Partial<MediaInfo>) => [{ ...info('video/mp4'), durationMs: 600_000, videoCodec: 'avc1', audioCodec: 'mp4a', ...details }]
+    for (const videoCodec of ['avc1', 'hvc1', 'av01', 'vp09', 'mp4v', 'apcn']) {
+      expect(() => adapter.validateSettings('youtube_channel', settings, video({ videoCodec, audioCodec: 'Opus' }))).not.toThrow()
+    }
+    expect(() => adapter.validateSettings('youtube_channel', settings, video({ videoCodec: 'xyz1' }))).toThrow(expect.objectContaining({ code: 'unsupported_codec' }))
+    expect(() => adapter.validateSettings('youtube_channel', settings, video({ videoCodec: null }))).toThrow(expect.objectContaining({ code: 'unsupported_codec' }))
+    expect(() => adapter.validateSettings('youtube_channel', settings, video({ durationMs: 13 * 3_600_000 }))).toThrow(expect.objectContaining({ code: 'video_too_long' }))
+    // A long vertical video is an ordinary video, not refused.
+    expect(() => adapter.validateSettings('youtube_channel', settings, video({ durationMs: 30 * 60_000, width: 1080, height: 1920 }))).not.toThrow()
+    expect(() => adapter.validateSettings('youtube_channel', settings, video({ durationMs: null, videoCodec: null }))).not.toThrow()
+  })
+
   it('takes one MP4 with a title, and optionally a thumbnail', () => {
     expect(() => adapter.validateSettings('youtube_channel', settings, [info('video/mp4')], 'ok')).not.toThrow()
     expect(() => adapter.validateSettings('youtube_channel', settings, [info('video/mp4'), info('image/jpeg')])).not.toThrow()

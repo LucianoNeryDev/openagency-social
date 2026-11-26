@@ -20,8 +20,14 @@ JSON (at most 1 MB) except media uploads. Errors have the shape
 `POST /v1/tenants/:org/media?name=<file name>` with a raw JPEG or PNG body of
 at most 10 MB, or an MP4 of at most 1 GB, and `Content-Type` matching the file.
 The body may be chunked; the file is stored as it arrives, 16 MiB at a time.
-Returns `201 {id, name, mimeType, sizeBytes, width, height}`; the pixel size
-comes from the file header and is null when it cannot be read.
+Returns `201 {id, name, mimeType, sizeBytes, width, height, durationMs,
+videoCodec, audioCodec}`; the pixel size comes from the file header and is
+null when it cannot be read. For an MP4 the engine reads the `moov` box as
+the file arrives (before or after the media data): `durationMs`, the first
+video track's display size after its rotation, and the codecs as MP4
+sample entries (`avc1` H.264, `hvc1`/`hev1` HEVC, `av01`, `vp09`; `mp4a`
+AAC, `Opus`), null when there is no such track or the file does not say.
+Images have null there.
 
 `GET /v1/tenants/:org/media/:id` streams the raw bytes. The dashboard API uses
 it to serve signed public URLs, because Instagram fetches images from a URL.
@@ -55,7 +61,10 @@ identical content returns the existing jobs (`200`); different content or
 channels for that revision is `409 revision_conflict`. Other refusals:
 `publish_at_too_soon` (under five minutes), `paused`, `channel_inactive`,
 `content_too_long`, `too_many_media`, `invalid_settings`, `daily_limit`,
-`media_required`, `unsupported_media`, `aspect_ratio`, `not_found`.
+`media_required`, `unsupported_media`, `aspect_ratio`, `not_found`, and for
+videos `video_too_large`, `video_too_short`, `video_too_long` and
+`unsupported_codec`. Videos stored before their length and codecs were read
+are checked for size only.
 
 Facebook Page settings: `{"link": "https://…"}` shares a link with its preview
 card (not combinable with images); `{"unpublished": true}` creates a hidden
@@ -81,8 +90,11 @@ between 4:5 and 1.91:1 (several become a carousel), and no settings. A reel is
 one MP4 video, optionally followed by one JPEG cover, with the settings
 `{"shareToFeed": true, "thumbOffsetMs": 15000}` (both optional; the offset
 picks the cover frame when no cover image is attached). The caption is limited
-to 2,200 characters. A reel's video can take minutes to process; the attempt
-beats while it waits.
+to 2,200 characters. The video must be H.264 or HEVC with AAC sound (or
+none), 3 seconds to 15 minutes long and at most 300 MB, as Instagram's
+[reel specifications](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media#reel-specifications)
+ask; 9:16 is recommended. A reel's video can take minutes to process; the
+attempt beats while it waits.
 
 YouTube channels take one MP4 video, optionally followed by a JPEG or PNG
 thumbnail of at most 2 MB (set after the upload; ignored when the channel may
@@ -97,7 +109,11 @@ bytes. Settings:
 `title` (1 to 100 characters) is required; the rest are optional, with
 `privacy` `public`, `unlisted` or `private` (default `public`) and
 `madeForKids` defaulting to false. Titles and descriptions may not contain `<`
-or `>`. A vertical video up to three minutes long becomes a Short.
+or `>`. The video may use any common codec (H.264, HEVC, AV1, VP9, VP8,
+MPEG-4 Part 2, ProRes) and last up to 12 hours; a channel YouTube has not
+verified is held to 15 minutes, which only the upload reveals. A square or
+vertical video up to three minutes long becomes a Short; a longer one is an
+ordinary video.
 
 | Route | Purpose |
 | --- | --- |
