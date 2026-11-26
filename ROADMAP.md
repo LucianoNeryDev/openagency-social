@@ -86,3 +86,22 @@ Updated 2026-11-26.
 - Hiding comments.
 - Database and role names chosen by the operator. The migrations accept only
   the fixed pairs listed in [docs/deploy.md](docs/deploy.md#database).
+- What Portal's social analysis needs from the engine:
+  - Statistics for posts made outside OpenAgency on Facebook Pages,
+    Instagram and YouTube, so an account is analysed whole. Today only the
+    posts the engine published are read; the others only send
+    `channel.post.created`.
+  - Reads at fixed ages after publishing (one and two days, one and four
+    weeks), so posts are compared at the same age.
+  - More numbers where a platform's API gives them: profile visits and
+    follows a post brought, watch time on reels and videos, and where views
+    came from.
+  - Audience statistics: when followers are online, and their countries and
+    ages.
+
+## Later
+
+- Public numbers of competitors' Instagram business accounts, chosen by the
+  organization, for Portal's reports.
+- Statistics for TikTok, X, LinkedIn, Threads, Pinterest and Reddit, through
+  the official APIs where a platform offers them.
