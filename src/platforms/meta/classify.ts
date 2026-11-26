@@ -1,8 +1,10 @@
 import { RateLimited, ReauthRequired, type PublishOutcome } from '../types.js'
 import { GraphError } from './graph.js'
 
-/** Meta error codes that mean the token or its permissions no longer work. */
-const authCodes = new Set([102, 190, 10])
+/** Meta error codes that mean the token no longer works: a new login is needed. */
+const authCodes = new Set([102, 190])
+/** A permission this action needs is missing (10, 200-299): the token still works for everything else. */
+const permissionCode = (code: number) => code === 10 || (code >= 200 && code <= 299)
 /** Rate limits: the request was rejected before anything was created. */
 const rateLimitCodes = new Set([4, 17, 32, 341, 613, 80001])
 
@@ -24,7 +26,8 @@ export function classify(error: unknown, sent: boolean): PublishOutcome {
   }
   const code = failure.code ?? 0
   const detail = `HTTP ${failure.status} code ${code}${failure.subcode ? `/${failure.subcode}` : ''}: ${failure.message}`
-  if (authCodes.has(code) || (code >= 200 && code <= 299)) return { kind: 'failed', retryable: false, code: 'auth', detail, reauth: true }
+  if (authCodes.has(code)) return { kind: 'failed', retryable: false, code: 'auth', detail, reauth: true }
+  if (permissionCode(code)) return { kind: 'failed', retryable: false, code: 'permission_missing', detail }
   if (rateLimitCodes.has(code) || failure.status === 429) return { kind: 'failed', retryable: true, code: 'rate_limited', detail }
   if (failure.transient || failure.status >= 500) {
     return sent ? { kind: 'uncertain', code: 'platform_error', detail } : { kind: 'failed', retryable: true, code: 'platform_error', detail }

@@ -94,7 +94,9 @@ const commentPages = 3
 const maxResponsesPerRead = 300
 /** Retry, rather than fail, when the project's daily quota or rate runs out. */
 const rateReasons = new Set(['quotaExceeded', 'rateLimitExceeded', 'userRateLimitExceeded', 'dailyLimitExceeded'])
-const authReasons = new Set(['authError', 'insufficientPermissions', 'forbidden', 'youtubeSignupRequired'])
+/** The grant itself is refused: a new login is needed. Other 403s are about this one action or channel. */
+const authReasons = new Set(['authError'])
+const permissionReasons = new Set(['insufficientPermissions', 'forbidden', 'youtubeSignupRequired'])
 
 /**
  * YouTube channels through the Data API v3: one MP4 per post, uploaded in a
@@ -478,6 +480,7 @@ function classify(error: unknown, sent: boolean): PublishOutcome {
   if (failure.status === 401 || (failure.status === 403 && failure.reason && authReasons.has(failure.reason))) {
     return { kind: 'failed', retryable: false, code: 'auth', detail, reauth: true }
   }
+  if (failure.status === 403 && failure.reason && permissionReasons.has(failure.reason)) return { kind: 'failed', retryable: false, code: 'permission_missing', detail }
   if (failure.status === 429 || (failure.reason && rateReasons.has(failure.reason))) return { kind: 'failed', retryable: true, code: 'rate_limited', detail }
   if (failure.status >= 500) return sent ? { kind: 'uncertain', code: 'platform_error', detail } : { kind: 'failed', retryable: true, code: 'platform_error', detail }
   return { kind: 'failed', retryable: false, code: 'rejected', detail }

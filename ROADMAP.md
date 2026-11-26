@@ -8,6 +8,8 @@ Updated 2026-11-26.
 
 ## Done
 
+- A missing permission for one action fails that job, without asking the
+  channel for a new login.
 - Instagram's failed media downloads retried, `PUBLIC_MEDIA_URL` checked at
   start and on submit, and browser jobs without a runner failing cleanly.
 - Worker lanes: video posts and browser jobs have their own slots.
@@ -58,8 +60,6 @@ Updated 2026-11-26.
 - Publishing that agencies can rely on:
   - Rate limits: Meta's usage headers read, retries that wait for the limit's
     window, and the app-wide pause the readers set honoured by publishing.
-  - A missing permission for one action no longer marks the whole channel as
-    needing a new login.
   - Videos checked on submit (size, duration, codec) instead of failing
     after minutes of processing.
   - Posts cancelled by a pause can be brought back when it is lifted.

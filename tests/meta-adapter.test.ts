@@ -125,7 +125,8 @@ describe('Meta publish', () => {
   it('classifies Graph errors', async () => {
     const cases: Array<[Reply, Record<string, unknown>]> = [
       [graphError(400, 190), { kind: 'failed', retryable: false, code: 'auth', reauth: true }],
-      [graphError(403, 200), { kind: 'failed', retryable: false, code: 'auth', reauth: true }],
+      [graphError(403, 200), { kind: 'failed', retryable: false, code: 'permission_missing' }],
+      [graphError(403, 10), { kind: 'failed', retryable: false, code: 'permission_missing' }],
       [graphError(400, 32), { kind: 'failed', retryable: true, code: 'rate_limited' }],
       [graphError(500, 2, { is_transient: true }), { kind: 'uncertain', code: 'platform_error' }],
       [graphError(400, 100), { kind: 'failed', retryable: false, code: 'rejected' }],
