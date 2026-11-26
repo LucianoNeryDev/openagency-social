@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { invalid } from '../../errors.js'
 import type { MediaInfo, PublishInput, PublishOutcome, ReconcileInput, ReconcileOutcome } from '../types.js'
 import { classify } from './classify.js'
-import type { GraphCall, GraphClient } from './graph.js'
+import { GraphError, type GraphCall, type GraphClient } from './graph.js'
 
 const createdSchema = z.object({ id: z.string().regex(/^[\d_]+$/) })
 const containerStatusSchema = z.object({ status_code: z.string().optional(), status: z.string().optional() })
@@ -31,6 +31,14 @@ export const defaultImagePoll: ContainerPoll = { intervalMs: 3_000, attempts: 20
 export const defaultVideoPoll: ContainerPoll = { intervalMs: 5_000, attempts: 120 }
 
 const isVideo = (file: { mimeType: string }) => file.mimeType === 'video/mp4'
+
+/**
+ * Instagram could not fetch a file from its URL (2207052), timed out doing so
+ * (2207003) or found it expired (2207020): nothing was created, and a later
+ * try with a fresh signed URL usually works.
+ */
+const downloadSubcodes = new Set([2207003, 2207020, 2207052])
+const downloadFailed = (error: unknown) => error instanceof GraphError && error.failure.kind === 'http' && downloadSubcodes.has(error.failure.subcode ?? 0)
 
 /**
  * A post is 1 to 10 JPEG images (several make a carousel), or a reel: one MP4
@@ -99,6 +107,7 @@ export class InstagramPublisher {
       const ready = await this.waitForContainer(call, containerId, poll, input.heartbeat)
       if (ready) return ready
     } catch (error) {
+      if (downloadFailed(error)) return { kind: 'failed', retryable: true, code: 'media_download_failed', detail: error instanceof Error ? error.message.slice(0, 500) : 'Media download failed' }
       return classify(error, false)
     }
 
@@ -120,6 +129,9 @@ export class InstagramPublisher {
     for (let attempt = 0; attempt < poll.attempts; attempt++) {
       const status = containerStatusSchema.parse(await this.graph.request('GET', `/${id}`, { ...call, query: { fields: 'status_code,status' } }))
       if (status.status_code === 'FINISHED') return null
+      if (status.status_code === 'ERROR' && /\b220(7003|7020|7052)\b/.test(status.status ?? '')) {
+        return { kind: 'failed', retryable: true, code: 'media_download_failed', detail: `ERROR: ${status.status}`.slice(0, 500) }
+      }
       if (status.status_code === 'ERROR' || status.status_code === 'EXPIRED') {
         return { kind: 'failed', retryable: false, code: 'container_error', detail: `${status.status_code}: ${status.status ?? 'no detail'}`.slice(0, 500) }
       }

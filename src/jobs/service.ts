@@ -5,7 +5,7 @@ import { lockControls, readPublishing } from '../channels.js'
 import { adapterFor, clock, recordEvent, type EngineContext } from '../context.js'
 import { emitJobOutcome } from '../webhooks.js'
 import { channelDriver } from './driver.js'
-import { attempts, channels, jobs, type JobPayload } from '../db/schema.js'
+import { attempts, channels, jobs, type JobLane, type JobPayload } from '../db/schema.js'
 import { conflict, invalid, notFound } from '../errors.js'
 import { loadMediaInfo } from '../media.js'
 
@@ -63,6 +63,10 @@ export async function submitJobs(context: EngineContext, input: SubmitInput) {
     for (const target of input.channels) {
       const channel = rows.find(row => row.id === target.channelId)!
       if (channel.status !== 'active') throw conflict('channel_inactive', `Channel ${channel.name} needs to be reconnected`)
+      // Instagram and the browser runner fetch media from PUBLIC_MEDIA_URL: refused now rather than failing when due.
+      if (input.mediaIds.length && !context.publicMedia && (channel.kind === 'instagram_account' || channel.platform === 'instagram' || channel.browserAccountId)) {
+        throw invalid('public_media_unavailable', `${channel.name} needs PUBLIC_MEDIA_URL to post media`)
+      }
       const adapter = adapterFor(context, channel.platform)
       adapter.validateSettings(channel.kind, target.settings, mediaInfo, input.content)
       const limits = adapter.limits(channel.kind)
@@ -78,11 +82,13 @@ export async function submitJobs(context: EngineContext, input: SubmitInput) {
     const full = counts.find(row => row.count >= controls.maxPostsPerChannelPerDay)
     if (full) throw conflict('daily_limit', `Daily limit of ${controls.maxPostsPerChannelPerDay} posts reached for a channel`, { channelId: full.channelId })
 
+    const video = mediaInfo.some(file => file.mimeType.startsWith('video/'))
     const created = await transaction.insert(jobs).values(input.channels.map(target => {
+      const channel = rows.find(row => row.id === target.channelId)!
       const payload: JobPayload = { content: input.content, mediaIds: input.mediaIds, settings: target.settings,
         approvedByUserId: input.approvedByUserId, approvedAt: input.approvedAt }
       return { organizationId: input.organizationId, postId: input.postId, revision: input.revision, channelId: target.channelId,
-        payload, payloadHash: hashes.get(target.channelId)!, publishAt, notBefore: publishAt }
+        lane: jobLane(channel, video), payload, payloadHash: hashes.get(target.channelId)!, publishAt, notBefore: publishAt }
     })).returning()
     for (const job of created) {
       await recordEvent(transaction, { organizationId: input.organizationId, kind: 'job.queued', jobId: job.id, channelId: job.channelId,
@@ -186,6 +192,11 @@ export async function resolveJob(context: EngineContext, jobId: string, input: z
     await emitJobOutcome(transaction, updated!, now)
     return { job: jobView(updated!) }
   })
+}
+
+/** Browser channels drive a website for minutes; videos upload and process for minutes: each has its own slots. */
+export function jobLane(channel: { browserAccountId: string | null }, video: boolean): JobLane {
+  return channel.browserAccountId ? 'browser' : video ? 'video' : 'standard'
 }
 
 function canonicalJson(value: unknown): string {

@@ -1,3 +1,4 @@
+import { errorFields, log } from './log.js'
 import { createHash, createHmac, hkdfSync } from 'node:crypto'
 import { and, eq, inArray } from 'drizzle-orm'
 import { recordEvent, type EngineContext } from './context.js'
@@ -178,4 +179,24 @@ export function publicMediaUrl(publicMedia: PublicMedia, organizationId: string,
   url.searchParams.set('expires', String(expires))
   url.searchParams.set('signature', mediaSignature(publicMedia.key, organizationId, mediaId, expires))
   return url.href
+}
+
+/**
+ * At start: PUBLIC_MEDIA_URL is where Instagram and the browser runner fetch
+ * media, so an address that does not answer at all makes every such post fail
+ * later. Any HTTP answer counts (the route wants a signature); only a network
+ * failure is reported. Returns whether it answered.
+ */
+export async function checkPublicMediaUrl(baseUrl: string | undefined, fetcher: typeof fetch = fetch) {
+  if (!baseUrl) {
+    log('warn', 'PUBLIC_MEDIA_URL is not set: Instagram and browser posts with media are refused')
+    return false
+  }
+  try {
+    await fetcher(baseUrl, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+    return true
+  } catch (error) {
+    log('error', 'PUBLIC_MEDIA_URL does not answer: Instagram and browser posts with media will fail', { url: new URL(baseUrl).origin, ...errorFields(error) })
+    return false
+  }
 }
