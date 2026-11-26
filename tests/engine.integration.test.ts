@@ -10,7 +10,7 @@ import { channelActivity, webhookDeliveries, webhooks, type WebhookEventType, at
   postResponses, providerApps, responseChecks } from '../src/db/schema.js'
 import * as schema from '../src/db/schema.js'
 import { cancelJobs, listJobs, reconcileJob, resolveJob, submitJobs, type SubmitInput } from '../src/jobs/service.js'
-import { claimNext, executeClaimed, interrupted, markSent, maxAttempts, requeueUnsent, sweep, Worker } from '../src/jobs/worker.js'
+import { claimNext, executeClaimed, interrupted, markSent, maxAttempts, requeueUnsent, settleAttempt, sweep, Worker } from '../src/jobs/worker.js'
 import { publishingHealth } from '../src/jobs/health.js'
 import { AttemptClosedError } from '../src/platforms/types.js'
 import { maxImageBytes, mediaChunkBytes, mediaFileBytes, mediaSignature, publicMediaKey, readMedia, storeMedia } from '../src/media.js'
@@ -438,8 +438,8 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       advance(11 * 60_000)
       expect(await sweep(context)).toEqual([claimed!.jobId])
       expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'uncertain', lastError: 'abandoned' })
-      // A confirmed result that arrives late still settles the job.
-      await executeClaimed(context, claimed!)
+      // A confirmed result that arrives late (its request was sent before the sweep) still settles the job.
+      await settleAttempt(context, claimed!, { kind: 'published', externalId: 'late-1' })
       expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'published' })
     })
   })

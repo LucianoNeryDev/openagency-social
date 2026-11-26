@@ -18,7 +18,8 @@
   `jobs.changed` control event after any job state change; webhooks
   `post.uncertain` and `post.cancelled`; `/readyz` reports `publishing`
   (`ok`, `stalled`, `late`, `off`), the worker's last pass and the oldest due
-  job.
+  job, and `answering` (`failing` after two failed AI calls in an hour with
+  none drafted).
 
 - Risk gate for automatic answers ([ADR 0004](docs/adr/0004-engine-drafts-replies.md#amendment-risk-gate)):
   the decision request also asks `risk` (`low`, `medium`, `high`) in the

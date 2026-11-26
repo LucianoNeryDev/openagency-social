@@ -124,8 +124,12 @@ more and fails as `too_late`.
 `publishing`: `ok`, `stalled` (the worker has not finished a pass for four
 poll intervals, at least a minute), `late` (a due job has waited 15 minutes
 to start) or `off` (no worker in this process); `worker.lastTickAt`; and
-`oldestDueJob` (`notBefore`, `waitingSeconds`) or null. Monitoring alerts on
-anything but `ok`.
+`oldestDueJob` (`notBefore`, `waitingSeconds`) or null; and `answering`:
+`failing` when the decision or drafting call failed for at least two items in
+the last hour and succeeded for no more (a provider out of funds, a revoked
+key), `ok`, or `off` without `ANTHROPIC_API_KEY`, with `answeringLastHour`
+(`failed`, `drafted`). Publishing does not depend on answering. Monitoring
+alerts on anything but `ok`.
 
 ## Post metrics
 

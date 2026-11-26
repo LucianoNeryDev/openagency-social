@@ -12,7 +12,7 @@ import { disableChannel, finishConnect, listChannels, readPublishing, setPublish
 import type { EngineContext } from '../context.js'
 import { EngineError } from '../errors.js'
 import { cancelJobs, listJobs, reconcileJob, resolveJob, resolveJobSchema, submitJobs } from '../jobs/service.js'
-import { publishingHealth } from '../jobs/health.js'
+import { answeringHealth, publishingHealth } from '../jobs/health.js'
 import type { WorkerHealth } from '../jobs/worker.js'
 import { errorFields, log } from '../log.js'
 import { maxMediaBytes, readMedia, storeMedia } from '../media.js'
@@ -63,11 +63,10 @@ export function createEngineApp(context: EngineContext, serviceToken: string, op
 
   router.get('/healthz', defineEventHandler(() => ({ ok: true })))
   // 200 while the database answers (the orchestrator's check). `publishing`
-  // is for monitoring: ok, stalled (the worker stopped ticking) or late (a due
-  // job has waited 15 minutes to start). No tenant data.
+  // and `answering` are for monitoring (docs/api.md). No tenant data.
   router.get('/readyz', route(async () => {
     await context.db.execute(sql`select 1`)
-    return { ok: true, ...await publishingHealth(context, options.worker?.()) }
+    return { ok: true, ...await publishingHealth(context, options.worker?.()), ...await answeringHealth(context) }
   }))
 
   router.post('/v1/connect/start', authed(async event => {
