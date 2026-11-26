@@ -806,6 +806,10 @@ export interface AnsweringSettings {
   replyContext: string
   delaySeconds: number
   cases: AnsweringCase[]
+  /** Learn from answers a person approved and reuse them for the same or similar items (`learned_answer`); off, nothing is learned or matched. */
+  learning: boolean
+  /** 0.7 to 1: how similar a new item's text must be to a learned one (trigram Jaccard) when it is not the same. */
+  learningSimilarity: number
 }
 
 export interface AnsweringContextEntry {
@@ -814,8 +818,9 @@ export interface AnsweringContextEntry {
   body: string
 }
 
-/** Settings as stored: those pushed before `riskThreshold` existed lack it (read them through `storedSettings`). */
-export type StoredAnsweringSettings = Omit<AnsweringSettings, 'riskThreshold'> & { riskThreshold?: number }
+/** Settings as stored: those pushed before `riskThreshold` or learning existed lack them (read them through `storedSettings`). */
+export type StoredAnsweringSettings = Omit<AnsweringSettings, 'riskThreshold' | 'learning' | 'learningSimilarity'>
+  & { riskThreshold?: number, learning?: boolean, learningSimilarity?: number }
 
 /** What the dashboard pushed last. No row: the feature is off for the tenant. */
 export const answeringSettings = pgTable('answering_settings', {
@@ -863,6 +868,9 @@ export const inboundDrafts = pgTable('inbound_drafts', {
   probabilities: jsonb('probabilities').$type<{ full: number, draft: number, none: number }>(),
   confidence: doublePrecision('confidence'),
   caseId: text('case_id'),
+  // The learned answer that decided (`learned_answer`) and how similar the item was to it (1: the same text). No foreign key: it may be forgotten.
+  learnedAnswerId: uuid('learned_answer_id'),
+  learnedSimilarity: doublePrecision('learned_similarity'),
   decisionThreshold: doublePrecision('decision_threshold').notNull(),
   noneThreshold: doublePrecision('none_threshold').notNull(),
   // The risk of answering it unseen: null when not asked (no decision model, a failed call, or decided before it existed).
@@ -899,6 +907,7 @@ export const inboundDrafts = pgTable('inbound_drafts', {
   check('inbound_drafts_target', sql`(kind = 'message') = (conversation_id is not null) and (kind = 'comment') = (response_id is not null)`),
   check('inbound_drafts_text_length', sql`char_length(draft_text) between 1 and 10000`),
   check('inbound_drafts_digest', sql`(draft_text is null) = (draft_digest is null) and (draft_digest is null or draft_digest ~ '^[0-9a-f]{64}$')`),
+  check('inbound_drafts_learned', sql`(learned_answer_id is null) = (learned_similarity is null) and learned_similarity between 0 and 1`),
   // One decision per inbound DM and per comment.
   uniqueIndex('inbound_drafts_message').on(table.conversationId, table.inboundExternalId).where(sql`kind = 'message'`),
   uniqueIndex('inbound_drafts_comment').on(table.responseId).where(sql`kind = 'comment'`),
@@ -907,6 +916,55 @@ export const inboundDrafts = pgTable('inbound_drafts', {
   // The channel cascade, a disable, and retention.
   index('inbound_drafts_channel').on(table.channelId),
   index('inbound_drafts_created').on(table.createdAt),
+])
+
+/**
+ * An answer a person approved and the platform confirmed, kept to answer the
+ * same or a similar item again (`learned_answer`). One per channel, kind and
+ * inbound fingerprint: the newest approval wins. The inbound text is
+ * third-party personal data, kept redacted (no addresses, links or phone
+ * numbers, no author) and only as long as the item it came from: 180 days
+ * after `inboundAt` (the message's send time, or the post's publishAt for a
+ * comment), and with the channel.
+ */
+export const learnedAnswers = pgTable('learned_answers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: text('organization_id').notNull(),
+  channelId: uuid('channel_id').notNull().references(() => channels.id, { onDelete: 'cascade' }),
+  kind: text('kind').$type<DraftKind>().notNull(),
+  // 32 hex characters of SHA-256 over the normalised inbound text (learned-match.ts).
+  fingerprint: text('fingerprint').notNull(),
+  // The redacted inbound text as written (for people), and its normalised form (for matching).
+  inboundText: text('inbound_text').notNull(),
+  normalizedText: text('normalized_text').notNull(),
+  // When the answered item was sent (a DM) or its post was published (a comment): retention runs from it.
+  inboundAt: timestamp('inbound_at', { withTimezone: true }).notNull(),
+  replyText: text('reply_text').notNull(),
+  language: text('language'),
+  // The engine draft the person sent, edited (`edited`) or not; null when they wrote the answer without one.
+  sourceDraftId: uuid('source_draft_id'),
+  edited: boolean('edited').notNull(),
+  // The reply names the person it answered (their name or handle): it is never reused word for word, only adapted by the drafting model.
+  addressesPerson: boolean('addresses_person').notNull().default(false),
+  approvedByUserId: text('approved_by_user_id').notNull(),
+  approvedAt: timestamp('approved_at', { withTimezone: true }).notNull(),
+  // Decisions that used it, and the last one.
+  uses: integer('uses').notNull().default(0),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  createdAt: createdAt(),
+  // Moves with a new approval and with an edit of the reply: a draft made from it before then is no longer sent automatically.
+  updatedAt: updatedAt(),
+}, table => [
+  check('learned_answers_kind', oneOf('kind', draftKinds)),
+  check('learned_answers_fingerprint', sql`fingerprint ~ '^[0-9a-f]{32}$'`),
+  check('learned_answers_text_length', sql`char_length(inbound_text) between 1 and 5000 and char_length(normalized_text) between 1 and 2000
+    and char_length(reply_text) between 1 and 10000`),
+  check('learned_answers_uses', sql`uses >= 0`),
+  unique('learned_answers_scope_fingerprint').on(table.channelId, table.kind, table.fingerprint),
+  // Matching reads a scope's newest approvals; the dashboard lists a tenant's.
+  index('learned_answers_scope').on(table.channelId, table.kind, table.approvedAt),
+  index('learned_answers_organization').on(table.organizationId, table.approvedAt, table.id),
+  index('learned_answers_inbound').on(table.inboundAt),
 ])
 
 export const controlEventTypes = ['drafts.available', 'messages.changed', 'replies.changed', 'jobs.changed'] as const

@@ -2,8 +2,9 @@ import { and, eq, inArray, lt, notInArray, or, sql, type SQL } from 'drizzle-orm
 import { clock, recordEvent, type EngineContext } from './context.js'
 import type { Executor } from './db/client.js'
 import { deleteExpiredDeliveries } from './webhooks.js'
+import { learnedAnswersRetentionMs } from './answering/learning.js'
 import {
-  channelMetricSamples, channels, conversations, directMessages, inboundDrafts, jobs, outgoingMessageCancellations, outgoingMessages, postMetricSamples, postResponses, replies,
+  channelMetricSamples, channels, conversations, directMessages, inboundDrafts, jobs, learnedAnswers, outgoingMessageCancellations, outgoingMessages, postMetricSamples, postResponses, replies,
   replyCancellations, responseChecks,
 } from './db/schema.js'
 
@@ -66,8 +67,12 @@ export async function applyRetention(context: EngineContext) {
   // Decisions and drafts answer inbound rows: they go after as long, and with a disabled channel (the cascades cover the rest).
   const drafts = await context.db.delete(inboundDrafts).where(or(lt(inboundDrafts.createdAt, new Date(now - draftsRetentionMs)),
     inArray(inboundDrafts.channelId, disabledChannels))).returning({ id: inboundDrafts.id })
+  // Learned answers keep a redacted inbound text: as long as the item it came from (inboundAt), and not past a disabled channel.
+  const learned = await context.db.delete(learnedAnswers).where(lt(learnedAnswers.inboundAt, new Date(now - learnedAnswersRetentionMs))).returning({ id: learnedAnswers.id })
+  const learnedDisabled = await context.db.delete(learnedAnswers).where(inArray(learnedAnswers.channelId, disabledChannels)).returning({ id: learnedAnswers.id })
   return { postMetricSamples: postSamples.length, channelMetricSamples: channelSamples.length, responses: expired.length + disabled.length,
-    replies: expiredReplies.length + disabledReplies.length, ...conversationsExpired, webhookDeliveries, drafts: drafts.length }
+    replies: expiredReplies.length + disabledReplies.length, ...conversationsExpired, webhookDeliveries, drafts: drafts.length,
+    learnedAnswers: learned.length + learnedDisabled.length }
 }
 
 /** Outgoing messages that are settled and no longer looked for. Queued, sending and uncertain ones settle within a day of their send time. */
@@ -99,9 +104,10 @@ export async function forgetChannelConversations(executor: Executor, channelId: 
   await executor.delete(conversations).where(eq(conversations.channelId, channelId))
 }
 
-/** Responses, check state, replies and engine drafts of one channel, removed when it is disabled. */
+/** Responses, check state, replies, engine drafts and learned answers of one channel, removed when it is disabled. */
 export async function forgetChannelResponses(executor: Executor, channelId: string) {
   await executor.delete(inboundDrafts).where(eq(inboundDrafts.channelId, channelId))
+  await executor.delete(learnedAnswers).where(eq(learnedAnswers.channelId, channelId))
   await executor.delete(postResponses).where(eq(postResponses.channelId, channelId))
   await executor.delete(responseChecks).where(eq(responseChecks.channelId, channelId))
   await executor.delete(replies).where(eq(replies.channelId, channelId))

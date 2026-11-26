@@ -49,6 +49,8 @@ Across all of them:
   drafted with Claude for the control plane to approve. The engine still
   sends only what was approved, and re-checks its own records before an
   automatic send ([ADR 0004](docs/adr/0004-engine-drafts-replies.md)).
+  Answers a person approved are learned and reused for the same or similar
+  messages on that channel, still only below the risk threshold.
 - **Signed webhooks** ([Standard Webhooks](https://www.standardwebhooks.com/))
   for published and failed posts, moving numbers, new comments, new posts made
   elsewhere, profile edits, channel status, replies and messages; and signed

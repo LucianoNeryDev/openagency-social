@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Learned answers. A reply or DM a person approved (not an automatic send),
+  once the platform confirms it, is learned per channel and kind: the
+  person's text, redacted (no addresses, links or phone numbers) and
+  normalised, with the reply as sent, whether the person edited the draft,
+  and a use count (migration `0025`, table `learned_answers`, plus nullable
+  `inbound_drafts.learned_answer_id` and `learned_similarity`). A later item
+  with the same text, or a similar one (trigram Jaccard at or above
+  `learningSimilarity`, default 0.85), is decided `learned_answer` after the
+  cases: only the risk is asked, and `auto` still needs a risk strictly
+  below the threshold. The same text reuses the approved reply word for
+  word unless it names the person it first answered; otherwise the drafting
+  model adapts it. `guard_decision` also refuses an automatic send of a
+  learned draft once learning is off or the answer changed. New answering
+  settings `learning` (default `true`) and `learningSimilarity` (0.7 to 1);
+  the outbox's decisions carry `learnedAnswerId` and `learnedSimilarity`.
+  `GET`, `PATCH` and `DELETE /v1/tenants/:org/learned-answers` list, edit
+  and forget them. Learned texts are kept 180 days after the item they came
+  from, and go with a disabled channel.
 - Reconcile finds a post whose caption Meta changed: captions are compared
   normalised (NFKC, without emoji variation selectors and zero-width
   characters, whitespace collapsed), and when none matches whole, the first

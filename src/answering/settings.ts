@@ -5,6 +5,7 @@ import type { Executor } from '../db/client.js'
 import { answeringSettings, caseEffects, replyModelChoices, type AnsweringContextEntry, type AnsweringSettings, type StoredAnsweringSettings } from '../db/schema.js'
 import { conflict, notFound } from '../errors.js'
 import { advisoryLock } from '../exactly-once.js'
+import { defaultLearningSimilarity } from './learned-match.js'
 
 const text = (max: number) => z.string().max(max).transform(value => value.replace(/\r\n/g, '\n').trim())
 /** A handle as people write it: `@` and case dropped. */
@@ -14,6 +15,8 @@ const author = z.string().max(200).transform(value => value.trim().replace(/^@/,
 export const minAutoDelaySeconds = 60
 /** The risk threshold when the dashboard sends none, and for settings stored before it existed. */
 export const defaultRiskThreshold = 30
+/** Learning from approved answers, when the dashboard says nothing (and for settings stored before it existed). */
+export const defaultLearning = true
 
 /** One case of answering; at least one condition (authors or keywords) is set. */
 export const answeringCaseSchema = z.strictObject({
@@ -44,6 +47,8 @@ export const answeringSettingsSchema = z.strictObject({
   replyContext: text(8_000).default(''),
   delaySeconds: z.number().int().min(minAutoDelaySeconds).max(86_400),
   cases: z.array(answeringCaseSchema).max(100).refine(cases => new Set(cases.map(item => item.id)).size === cases.length, 'case IDs must be unique'),
+  learning: z.boolean().default(defaultLearning),
+  learningSimilarity: z.number().min(0.7).max(1).default(defaultLearningSimilarity),
 }) satisfies z.ZodType<AnsweringSettings, unknown>
 
 export const answeringContextSchema = z.array(z.strictObject({
@@ -85,7 +90,8 @@ function canonical(value: unknown): string {
 
 /** Stored settings with the defaults of fields added since they were pushed. */
 export function storedSettings(settings: StoredAnsweringSettings): AnsweringSettings {
-  return { ...settings, riskThreshold: settings.riskThreshold ?? defaultRiskThreshold }
+  return { ...settings, riskThreshold: settings.riskThreshold ?? defaultRiskThreshold, learning: settings.learning ?? defaultLearning,
+    learningSimilarity: settings.learningSimilarity ?? defaultLearningSimilarity }
 }
 
 export async function readAnswering(executor: Executor, organizationId: string): Promise<StoredAnswering | null> {

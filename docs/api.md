@@ -546,7 +546,8 @@ without Anthropic no drafts are written and items arrive without one.
     "decisionModel": "d1.1", "decisionPrompt": "Answer questions about opening hours and shipping; never complaints.",
     "decisionThreshold": 0.9, "noneThreshold": 0.8, "riskThreshold": 30, "replyModel": "haiku",
     "voice": "Warm, short, informal.", "replyContext": "We ship in the EU only.", "delaySeconds": 120,
-    "cases": [{ "id": "press", "effect": "never", "label": "Press", "authors": ["some.magazine"], "keywords": [], "channelIds": [] }]
+    "cases": [{ "id": "press", "effect": "never", "label": "Press", "authors": ["some.magazine"], "keywords": [], "channelIds": [] }],
+    "learning": true, "learningSimilarity": 0.85
   },
   "context": [{ "id": "hours", "topic": "opening_hours", "body": "Open 9-18, Monday to Saturday." }]
 }
@@ -562,7 +563,10 @@ to 30 (an integer, 0 to 100; settings stored before it existed read as 30),
 `claude-opus-5-5`). `delaySeconds` is 60 to 86,400. A case matches when every
 condition it sets holds: `authors` (a username or name, `@` and case ignored),
 `keywords` (in the text, case and accents ignored), `channelIds` (empty: all).
-`context` holds up to 500 entries. Each kind is processed only for items first
+`learning` (default `true`) turns [learned answers](#learned-answers) on and
+`learningSimilarity` (0.7 to 1, default 0.85) sets how similar a new item
+must be to a learned one; settings stored before they existed read as `true`
+and 0.85. `context` holds up to 500 entries. Each kind is processed only for items first
 seen after it was last switched on (`drafts` and the kind; `enabledAt`), so
 switching on never drafts the backlog, nor what arrived while the kind was
 off.
@@ -598,23 +602,28 @@ In order:
 1. A `never` case matches: `review` (`case_never`); only `risk` is asked.
 2. An `always` case matches: `auto` (`case_always`); only `risk` is asked.
    A flagged item is `review` (`flagged`).
-3. No `LIQUID_API_KEY`: `skipped` (`no_decision_model`), nothing asked; no
+3. With `learning` on, the item matches a [learned answer](#learned-answers)
+   of its channel and kind: `auto` (`learned_answer`), with its
+   `learnedAnswerId` and `learnedSimilarity`; only `risk` is asked. A
+   flagged item is `review` (`flagged`), keeping the learned answer.
+4. No `LIQUID_API_KEY`: `skipped` (`no_decision_model`), nothing asked; no
    policy: `review` (`no_decision_prompt`), only `risk` asked; a failed call,
    or a missing or malformed answer to either question: `skipped`
    (`decision_failed`).
-4. The choice is `full` with p(full) at or above `decisionThreshold`: `auto`
+5. The choice is `full` with p(full) at or above `decisionThreshold`: `auto`
    (`above_threshold`), unless flagged: a direct message with attachments is
    `review` (`flagged`).
-5. The choice is `none` with p(none) at or above `noneThreshold`: `none`
+6. The choice is `none` with p(none) at or above `noneThreshold`: `none`
    (`no_reply`).
-6. Otherwise `review` (`below_threshold`).
-7. An `auto` result whose risk score is not strictly below `riskThreshold`
+7. Otherwise `review` (`below_threshold`).
+8. An `auto` result whose risk score is not strictly below `riskThreshold`
    keeps its numbers but is `review` (`risk_above_threshold`). An unknown
-   risk never clears: an `always` case without `LIQUID_API_KEY` is `review`
-   (`risk_above_threshold`), and one whose risk call fails is `skipped`
+   risk never clears: an `always` case or a learned answer without
+   `LIQUID_API_KEY` is `review` (`risk_above_threshold`), and one whose risk
+   call fails is `skipped`
    (`decision_failed`). A failed risk call on a `never` case or without a
    policy keeps its reason and records `errorCode`.
-8. With `enabled: false`, an `auto` result keeps its numbers but is `review`
+9. With `enabled: false`, an `auto` result keeps its numbers but is `review`
    (`automation_off`).
 
 Every item the step decides gets a risk level when `LIQUID_API_KEY` is set
@@ -644,6 +653,17 @@ draft's flags gain `too_long`). The model's `flags` are `missing_facts`,
 `sensitive`, `complaint`, `legal`, `spam`, `injection_suspected`, `personal`,
 `out_of_scope` and `unanswerable`.
 
+An item decided from a learned answer is drafted from it. The same text
+(`learnedSimilarity` 1) reuses the approved reply word for word, without the
+drafting model (`draft.model` `learned_answer`), unless that reply names the
+person it first answered (`addressesPerson`); it is still held to the
+channel's length (`draft_too_long`). A similar text, or a reply that names
+its person, goes to the drafting model with the learned answer as an escaped
+`<approved_example>`: the earlier message and the approved reply, the example
+to adapt, whose facts and links count as the brand's; it must add nothing
+else and never copy the earlier person's name or details. Without a drafting
+model, or when it fails or objects, the item goes to a person as any other.
+
 A newer direct-message draft supersedes the conversation's older ones that no
 automatic send has taken. Decisions and drafts are kept 180 days and go at
 once when the channel is disabled, like the messages and comments they
@@ -666,7 +686,8 @@ answer.
     "risk": { "level": "low", "score": 7, "probabilities": { "low": 0.88, "medium": 0.1, "high": 0.02 },
               "confidence": 0.81 },
     "riskThreshold": 30,
-    "caseId": null, "decisionThreshold": 0.9, "noneThreshold": 0.8, "cost": 0.0001,
+    "caseId": null, "learnedAnswerId": null, "learnedSimilarity": null,
+    "decisionThreshold": 0.9, "noneThreshold": 0.8, "cost": 0.0001,
     "errorCode": null, "settingsVersion": 7
   },
   "draft": { "text": "…", "digest": "…", "model": "claude-haiku-5-5", "language": "en", "flags": [] },
@@ -682,7 +703,11 @@ and the post's `jobId`; `inboundExternalId` is then the reply's
 `answer` question's, null when it was not asked. `risk` is null when the
 risk was not asked or the call failed; `riskThreshold` is the threshold the
 decision was held to. Both are null for decisions made before the risk
-existed. The `draft.created` event carries `risk` and `riskThreshold` too.
+existed. `learnedAnswerId` names the learned answer behind a `learned_answer`
+decision (kept when the risk or a flag sent the item to a person) and
+`learnedSimilarity` how close the item was to it (1: the same text); both
+are null otherwise. The `draft.created` event carries `risk`,
+`riskThreshold`, `learnedAnswerId` and `learnedSimilarity` too.
 `draft` is null for `none` and when nothing
 was drafted (`draftErrorCode` says why drafting failed). `draft.digest` is the
 digest the reply or message route computes for the unedited text. A draft
@@ -701,7 +726,7 @@ conversation supersedes the older ones there (it also names them in
 | Code | Refused when |
 | --- | --- |
 | `guard_draft` | The draft is not the tenant's, or answers another conversation or comment. |
-| `guard_decision` | The draft's decision is not `auto`, or its stored risk score is missing, or not strictly below the `riskThreshold` stored with it or the tenant's current one, whichever is lower. |
+| `guard_decision` | The draft's decision is not `auto`, or its stored risk score is missing, or not strictly below the `riskThreshold` stored with it or the tenant's current one, whichever is lower; or it came from a learned answer and `learning` is now off, or that answer was forgotten, approved again or edited after the draft. |
 | `guard_settings` | The tenant's current settings do not have `enabled`, `drafts` and the kind on. |
 | `guard_revision` | The submission is not revision 1. |
 | `guard_digest` | The digest is not the draft's: the text was edited. |
@@ -712,6 +737,67 @@ conversation supersedes the older ones there (it also names them in
 The 24-hour window, every cap, pause and the other checks of the route
 apply as for a person. `approvedVia: "person"` (or absent) behaves as before
 and may not name a draft; `automation` without `draftId` is `400`.
+
+### Learned answers
+
+When a person approves an answer to a direct message or a comment (a send
+without `approvedVia: "automation"`) and the platform confirms it (`sent`,
+by the worker, a reconcile or a person resolving it), the engine learns it:
+the person's message or comment, redacted and normalised, with the reply as
+sent, per channel and kind. Automatic sends teach nothing. Nothing is learned
+when the tenant's `learning` is off, when the answered message has
+attachments, when its text has nothing left to match on (only emoji, say),
+or when the brand had already answered it (the send is then a follow-up). A
+DM's answered message is the person's newest one before the approval; a
+comment reply's is its `parentExternalId`.
+
+There is one learned answer per channel, kind and text: a newer approval for
+the same text replaces the reply (an older one settling later changes
+nothing). `edited` says whether the person changed the engine's draft (true
+also when there was no draft). `addressesPerson` says the reply contains a
+word of the person's name or handle; such a reply is never reused word for
+word.
+
+Matching is local and deterministic. Text is redacted (email addresses,
+links and runs of seven or more digits become `[email]`, `[link]` and
+`[number]`), then normalised: NFKC, accents dropped, lower case, every run of
+characters that are not letters or digits one space, at most 2,000
+characters. A new item matches a learned answer of its channel and kind with
+the same normalised text (a 32-hex SHA-256 fingerprint), else the most
+similar of the 500 newest approvals: the Jaccard similarity of the two texts'
+character trigrams at or above `learningSimilarity`, both texts of at least
+three words, and the same words with digits in both (so "a table for 2" and
+"a table for 4" never match). With `learning` off nothing is matched or
+learned; what was learned stays until it expires or is forgotten.
+
+The person's text is third-party personal data. It is kept redacted, without
+the author, and only as long as the item it came from: 180 days after the
+DM was sent, or after the post of the comment was published (`expiresAt`),
+and at once when the channel is disabled.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/tenants/:org/learned-answers?channelId=&kind=&after=&limit=50` | `{learnedAnswers, next}`, newest approval first. `channelId` and `kind` (`message` or `comment`) filter; `limit` 1-200; `next` (or null) is the `after` of the next page. |
+| `PATCH /v1/tenants/:org/learned-answers/:id` | `{replyText}` (1 to 10,000 characters, trimmed) → `{learnedAnswer}`. Reused from then on, word for word for the same text (`addressesPerson` becomes false); drafts made from the old text are no longer sent automatically. |
+| `DELETE /v1/tenants/:org/learned-answers/:id` | Forgets one → `{deleted: 1}`, or `404 not_found`. |
+| `DELETE /v1/tenants/:org/learned-answers?channelId=&kind=` | Forgets a channel's (`channelId` required), or one kind of it → `{deleted}`. |
+
+```json
+{
+  "id": "…", "organizationId": "…", "channelId": "…", "kind": "message",
+  "inboundText": "Do you ship to Spain? Write to [email]", "replyText": "Yes, in three days.",
+  "language": "en", "edited": true, "addressesPerson": false, "sourceDraftId": "…",
+  "approvedByUserId": "user-1", "approvedAt": "2030-01-01T10:00:00.000Z",
+  "uses": 4, "lastUsedAt": "2030-01-03T09:00:00.000Z",
+  "createdAt": "2030-01-01T10:01:00.000Z", "updatedAt": "2030-01-01T10:01:00.000Z",
+  "expiresAt": "2030-06-30T10:00:00.000Z"
+}
+```
+
+`uses` counts the decisions that used it (whatever their outcome) and
+`lastUsedAt` the last; neither moves `updatedAt`. Events
+`learned_answer.stored`, `learned_answer.updated` and
+`learned_answer.deleted` hold identifiers only.
 
 ### Revising a draft
 
