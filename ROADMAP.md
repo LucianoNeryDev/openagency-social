@@ -8,6 +8,8 @@ Updated 2026-11-26.
 
 ## Done
 
+- The platform access each feature needs, documented
+  ([docs/platform-access.md](docs/platform-access.md)).
 - A missing permission for one action fails that job, without asking the
   channel for a new login.
 - Instagram's failed media downloads retried, `PUBLIC_MEDIA_URL` checked at
@@ -66,9 +68,6 @@ Updated 2026-11-26.
   - Reconcile that finds a post without an exact caption match, and hidden
     Facebook posts; photos not uploaded again on each retry; longer timeouts
     for uploads and `media_publish`.
-  - The platform access each feature needs, documented: which Meta
-    permissions need Advanced Access through App Review and Business
-    Verification, and the Google project's verification and consent screen.
 
 ## Next
 
