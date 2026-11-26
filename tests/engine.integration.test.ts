@@ -125,7 +125,7 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
 
   beforeEach(async () => {
     // Every test starts with no jobs, so the clock can restart each time.
-    await fixture.migrator.query('truncate inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
+    await fixture.migrator.query('truncate learned_answers, inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
     adapter = new FakeAdapter()
     now = new Date('2030-01-01T10:00:00Z')
     org = `org-${randomUUID()}`
@@ -1380,7 +1380,7 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       ])
       await db.update(jobs).set({ publishAt: new Date(now.getTime() - 181 * 86_400_000) }).where(eq(jobs.id, first!.id))
       expect(await applyRetention(context)).toEqual({ postMetricSamples: 1, channelMetricSamples: 1, responses: 1, replies: 0,
-        conversations: 0, directMessages: 0, outgoingMessages: 0, webhookDeliveries: 0, drafts: 0 })
+        conversations: 0, directMessages: 0, outgoingMessages: 0, webhookDeliveries: 0, drafts: 0, learnedAnswers: 0 })
       expect((await db.select().from(postResponses)).map(row => row.jobId)).toEqual([second!.id])
       expect(await db.select().from(postMetricSamples)).toHaveLength(2)
 

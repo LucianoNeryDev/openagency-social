@@ -107,7 +107,7 @@ describe.skipIf(!required)('WhatsApp on PostgreSQL 17', { timeout: 60_000 }, () 
   afterAll(async () => { await fixture?.cleanup() }, 30_000)
 
   beforeEach(async () => {
-    await fixture.migrator.query('truncate inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
+    await fixture.migrator.query('truncate learned_answers, inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
     now = new Date('2030-01-01T10:00:00Z')
     org = `org-${randomUUID()}`
     api = new FakeCloudApi()
@@ -328,7 +328,7 @@ describe.skipIf(!required)('WhatsApp on PostgreSQL 17', { timeout: 60_000 }, () 
     } }
     context = { ...context, decisionModel, draftModel }
     await putAnswering(context, org, { version: 1, settings: { enabled: false, drafts: true, kinds: { messages: true, comments: false }, decisionModel: 'd1.1',
-      decisionPrompt: 'Answer opening hours.', decisionThreshold: 0.9, noneThreshold: 0.8, riskThreshold: 30, replyModel: 'haiku', voice: '', replyContext: '', delaySeconds: 120, cases: [] },
+      decisionPrompt: 'Answer opening hours.', decisionThreshold: 0.9, noneThreshold: 0.8, riskThreshold: 30, replyModel: 'haiku', voice: '', replyContext: '', delaySeconds: 120, cases: [], learning: true, learningSimilarity: 0.85 },
     context: [] })
     advance(1_000)
     await receive(inbound('Siete aperti domenica?'))

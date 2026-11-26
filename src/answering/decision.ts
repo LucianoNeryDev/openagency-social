@@ -5,6 +5,7 @@ import { riskLevels, type AnsweringCase, type AnsweringContextEntry, type Answer
 /**
  * Why an item is or is not answered automatically:
  * - `case_never`, `case_always`: a case matched (`never` wins over everything);
+ * - `learned_answer`: the item is the same as, or similar enough to, one a person answered before (a learned answer; after the cases);
  * - `above_threshold`: p(full) reached the decision threshold; `below_threshold`: nothing did;
  * - `no_reply`: the decision model chose `none` with p(none) at or above the none threshold;
  * - `flagged`: the item has attachments, so it is asked but never answered automatically;
@@ -15,7 +16,7 @@ import { riskLevels, type AnsweringCase, type AnsweringContextEntry, type Answer
  * - `no_draft`: cleared, but no usable draft came back (no Anthropic key, the drafting model said it cannot answer, or it failed);
  * - `draft_too_long`: cleared, but the draft does not fit the channel.
  */
-export const decisionReasons = ['case_never', 'case_always', 'above_threshold', 'below_threshold', 'no_reply', 'flagged', 'no_decision_model',
+export const decisionReasons = ['case_never', 'case_always', 'learned_answer', 'above_threshold', 'below_threshold', 'no_reply', 'flagged', 'no_decision_model',
   'no_decision_prompt', 'decision_failed', 'risk_above_threshold', 'automation_off', 'no_draft', 'draft_too_long'] as const
 export type DecisionReason = typeof decisionReasons[number]
 
@@ -52,6 +53,9 @@ export interface Decision {
   /** Null when the risk was not asked or the call failed. */
   risk: RiskAssessment | null
   caseId: string | null
+  /** The learned answer that decided (`learned_answer`), and how similar the item is to it (1: the same text). */
+  learnedAnswerId: string | null
+  learnedSimilarity: number | null
   decisionThreshold: number
   noneThreshold: number
   riskThreshold: number
@@ -199,9 +203,13 @@ const assessment = (answer: ChoiceAnswer<RiskLevel>): RiskAssessment =>
   ({ level: answer.choice, score: riskScore(answer.probabilities), probabilities: answer.probabilities, confidence: answer.confidence })
 const failureCode = (error: unknown) => error instanceof DecisionError ? error.code : 'error'
 
+/** A learned answer the item matched (learning.ts), as the decision sees it. */
+export interface LearnedDecisionMatch { id: string, similarity: number }
+
 /**
  * Decides one inbound item, in the order of the spec: a `never` case keeps it
  * for a person; an `always` case answers it without asking (unless flagged);
+ * so does a learned answer it matched (`learned_answer`);
  * without a decision model it is `skipped`; otherwise the model is asked one
  * Choice question (full, draft, none). A `full` choice with p(full) at or
  * above the threshold is `auto` unless flagged; `none` at or above the none threshold is `none`;
@@ -214,7 +222,7 @@ const failureCode = (error: unknown) => error instanceof DecisionError ? error.c
  * automatic sending off, an `auto` result keeps its numbers but becomes `review`.
  */
 export async function decide(input: { settings: AnsweringSettings, context: AnsweringContextEntry[], item: DecisionItem, flagged: boolean,
-  model: DecisionModel | undefined }): Promise<Decision> {
+  model: DecisionModel | undefined, learned?: LearnedDecisionMatch | null }): Promise<Decision> {
   const decision = await decideRaw(input)
   if (decision.outcome !== 'auto') return decision
   if (!riskClears(decision.risk?.score ?? null, decision.riskThreshold)) return { ...decision, outcome: 'review', reason: 'risk_above_threshold' }
@@ -223,9 +231,10 @@ export async function decide(input: { settings: AnsweringSettings, context: Answ
 }
 
 async function decideRaw(input: { settings: AnsweringSettings, context: AnsweringContextEntry[], item: DecisionItem, flagged: boolean,
-  model: DecisionModel | undefined }): Promise<Decision> {
+  model: DecisionModel | undefined, learned?: LearnedDecisionMatch | null }): Promise<Decision> {
   const { settings, item, model } = input
-  const base = { model: null, probabilities: null, confidence: null, risk: null, caseId: null, decisionThreshold: settings.decisionThreshold,
+  const base = { model: null, probabilities: null, confidence: null, risk: null, caseId: null, learnedAnswerId: null, learnedSimilarity: null,
+    decisionThreshold: settings.decisionThreshold,
     noneThreshold: settings.noneThreshold, riskThreshold: settings.riskThreshold, cost: null, errorCode: null }
   const { state, questions } = buildDecisionRequest(settings, input.context, item)
   // Where the answer question is not asked, the risk is asked alone. A failed call there records why; an `auto` it was to clear is `skipped`.
@@ -242,6 +251,12 @@ async function decideRaw(input: { settings: AnsweringSettings, context: Answerin
   if (never) return assessed({ ...base, outcome: 'review', reason: 'case_never', caseId: never.id })
   const always = firstMatch(settings, 'always', item)
   if (always) return assessed({ ...base, outcome: input.flagged ? 'review' : 'auto', reason: input.flagged ? 'flagged' : 'case_always', caseId: always.id })
+  // A person answered the same or a similar item before: like an `always` case, it still needs a risk below the threshold.
+  const learned = settings.learning ? input.learned : null
+  if (learned) {
+    return assessed({ ...base, outcome: input.flagged ? 'review' : 'auto', reason: input.flagged ? 'flagged' : 'learned_answer', learnedAnswerId: learned.id,
+      learnedSimilarity: learned.similarity })
+  }
   if (!model) return { ...base, outcome: 'skipped', reason: 'no_decision_model' }
   if (!settings.decisionPrompt) return assessed({ ...base, outcome: 'review', reason: 'no_decision_prompt' })
   let answers: Awaited<ReturnType<typeof ask<typeof questions>>>

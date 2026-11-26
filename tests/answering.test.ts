@@ -59,7 +59,7 @@ describe('decision', () => {
     expect(await decide({ settings, context: [], item: item(), flagged: false, model: undefined })).toMatchObject({ outcome: 'skipped', reason: 'no_decision_model' })
     // Above the threshold: auto, with the numbers recorded.
     expect(await decide({ settings, context: [], item: item(), flagged: false, model: asked.model })).toEqual({ outcome: 'auto', reason: 'above_threshold',
-      model: 'd1.1-test', probabilities: { full: 0.95, draft: 0.04, none: 0.01 }, confidence: 0.9, caseId: null, decisionThreshold: 0.85, noneThreshold: 0.8,
+      model: 'd1.1-test', probabilities: { full: 0.95, draft: 0.04, none: 0.01 }, confidence: 0.9, caseId: null, learnedAnswerId: null, learnedSimilarity: null, decisionThreshold: 0.85, noneThreshold: 0.8,
       risk: { level: 'low', score: 7, probabilities: { low: 0.88, medium: 0.1, high: 0.02 }, confidence: 0.81 }, riskThreshold: 30, cost: 0.0001, errorCode: null })
     // Flagged items are asked (so they can be none) but never auto.
     expect(await decide({ settings, context: [], item: item(), flagged: true, model: asked.model })).toMatchObject({ outcome: 'review', reason: 'flagged',

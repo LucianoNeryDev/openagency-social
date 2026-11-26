@@ -8,6 +8,11 @@ Updated 2026-11-26.
 
 ## Done
 
+- Learned answers: an answer a person approved, once the platform confirms
+  it, answers the same or a similar DM or comment on that channel again,
+  automatically when its risk is low (`learned_answer`, behind the same risk
+  gate and send guards), with an API to list, edit and forget them
+  ([ADR 0004](docs/adr/0004-engine-drafts-replies.md#amendment-learned-answers)).
 - Reconcile that finds a post whose caption Meta changed, and hidden
   Facebook posts; Facebook photos kept for retries instead of uploaded
   again; longer timeouts for uploads and the publishing request.
@@ -68,6 +73,10 @@ Updated 2026-11-26.
 - Revising a draft from a person's instruction ("make it shorter").
 - Events to Portal: a signed nudge when drafts, messages or reply receipts
   change, so Portal reads them at once instead of on its schedule.
+- Learned answers in Portal: a page per channel to see, edit and forget
+  them (`/v1/tenants/:org/learned-answers`), the `learning` switch and
+  `learningSimilarity` in the answering settings, and `learned_answer`
+  decisions shown with the answer they came from. Needs Portal.
 
 ## Next
 
