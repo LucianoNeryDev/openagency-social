@@ -216,14 +216,17 @@ export async function emitWebhookEvents(executor: Executor, event: { organizatio
 }
 
 /**
- * `post.published` or `post.failed` for a job that just settled, in the
- * settling transaction. A failure that will be retried is not an outcome.
+ * After any change of a job's state, in its transaction: the control plane
+ * hears `jobs.changed` (ADR 0005), and the tenant's webhooks get
+ * `post.published`, `post.failed`, `post.uncertain` or `post.cancelled`. A
+ * failure that will be retried, or a job queued again, sends no webhook.
  */
 export async function emitJobOutcome(executor: Executor, job: typeof jobs.$inferSelect, now: Date) {
-  if (job.state !== 'published' && job.state !== 'failed') return 0
+  await queueControlEvent(executor, 'jobs.changed', job.organizationId, now)
+  if (job.state !== 'published' && job.state !== 'failed' && job.state !== 'uncertain' && job.state !== 'cancelled') return 0
   const [channel] = await executor.select({ platform: channels.platform, kind: channels.kind }).from(channels).where(eq(channels.id, job.channelId)).limit(1)
   const base = { jobId: job.id, postId: job.postId, revision: job.revision, channelId: job.channelId, platform: channel?.platform ?? null, kind: channel?.kind ?? null }
-  return emitWebhookEvents(executor, { organizationId: job.organizationId, type: job.state === 'published' ? 'post.published' : 'post.failed',
+  return emitWebhookEvents(executor, { organizationId: job.organizationId, type: `post.${job.state}`,
     channelId: job.channelId, occurredAt: now, items: [job.state === 'published'
       ? { ...base, externalId: job.receipt?.externalId ?? null, url: job.receipt?.url ?? null, publishedAt: now.toISOString() }
       : { ...base, code: job.lastError }] })

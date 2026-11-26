@@ -53,7 +53,8 @@ Configuration comes from the environment; [.env.example](../.env.example)
 lists every variable. The engine binds to loopback only, so run your control
 plane's API on the same host (or in the same network namespace) and call it at
 `http://127.0.0.1:<port>`. `/healthz` and `/readyz` report liveness and
-database readiness.
+database readiness; `/readyz` also reports whether publishing keeps up
+(`publishing`, [api.md](api.md#jobs)).
 
 | Variable | Value |
 | --- | --- |
@@ -67,6 +68,26 @@ database readiness.
 | `RUNNER_URL`, `RUNNER_TOKEN` | Optional browser runner |
 | `ANTHROPIC_API_KEY`, `LIQUID_API_KEY` | Optional AI answers: drafting (Anthropic) and the decision (Liquid AI); redacted from logs |
 | `CONTROL_PLANE_EVENTS_URL` | Optional: the control plane's events route, `https:` or `http:` on loopback ([docs/api.md](api.md)) |
+| `SHUTDOWN_GRACE_MS` | Optional, default 25000: how long a stopping engine lets publishes finish (below) |
+
+### Stopping and deploying
+
+On `SIGTERM` the engine stops claiming jobs and gives publishes in flight
+`SHUTDOWN_GRACE_MS` (default 25 s) to finish. Half way, every attempt that has
+not yet sent its visible request (see `sentAt` in [api.md](api.md#jobs)) is
+closed and its job queued again; the next engine starts it at once. Attempts
+that did send get the rest of the grace. One still open when the grace ends is
+left to the next engine's sweeper, which makes it `uncertain` after ten
+minutes, and reconcile or a person settles it.
+
+Give the orchestrator a stop timeout longer than the grace, or it kills the
+process mid-request. Nomad's default `kill_timeout` is 5 s and a client caps
+it at `max_kill_timeout` (30 s by default): with the defaults, set
+`kill_timeout = "30s"` and keep `SHUTDOWN_GRACE_MS` at 25 s. With a client
+whose `max_kill_timeout` allows it, `SHUTDOWN_GRACE_MS=300000` and
+`kill_timeout = "330s"` let a slow upload's last chunk finish. Only one
+engine may run per database, so stop the old one before starting the new
+(one allocation, no canaries).
 
 ## Provider apps
 

@@ -189,6 +189,7 @@ export class MetaAdapter implements PlatformAdapter {
     if (settings.link && !photoIds.length) form.link = settings.link
     if (settings.unpublished) form.published = 'false'
     let created: z.infer<typeof createdSchema>
+    await input.beforeVisible?.()
     try {
       created = createdSchema.parse(await this.graph.request('POST', `/${page}/feed`, { ...call, form }))
     } catch (error) {

@@ -3,7 +3,7 @@ import type { ChannelKind, ChannelMetricName, ChannelMetricValues, MetricName, M
 import { invalid } from '../../errors.js'
 import { mediaFileBytes } from '../../media.js'
 import {
-  RateLimited, ReauthRequired, type AccountActivityInput, type AccountActivityResult, type AccountMetricsInput, type AccountMetricsResult, type ChannelProfile,
+  AttemptClosedError, RateLimited, ReauthRequired, type AccountActivityInput, type AccountActivityResult, type AccountMetricsInput, type AccountMetricsResult, type ChannelProfile,
   type PlatformPost, type ChannelCredential, type ChannelLimits, type ConnectedAccount,
   type FindReplyInput, type FindReplyOutcome, type MediaFile, type MediaInfo, type MetricsInput, type MetricsResult, type PlatformAdapter, type PlatformResponse,
   type PublishInput, type PublishOutcome, type ReconcileInput, type ReconcileOutcome, type ReplyInput, type ReplyOutcome, type ResolvedProviderApp,
@@ -203,6 +203,8 @@ export class YoutubeAdapter implements PlatformAdapter {
       for await (const chunk of video.chunks()) {
         // Stays inside the sweeper's window: each chunk times out first.
         await input.heartbeat?.()
+        // The last chunk completes the upload, and that creates the video.
+        if (sent + chunk.length >= video.sizeBytes) await input.beforeVisible?.()
         const reply = await this.google.request('PUT', session, { token: input.token, bytes: { data: chunk, type: video.mimeType }, accept: [308],
           headers: { 'Content-Range': `bytes ${sent}-${sent + chunk.length - 1}/${video.sizeBytes}` }, timeoutMs: this.options.uploadTimeoutMs ?? 8 * 60_000 })
         sent += chunk.length
@@ -211,6 +213,7 @@ export class YoutubeAdapter implements PlatformAdapter {
       }
       created = videoSchema.parse(last)
     } catch (error) {
+      if (error instanceof AttemptClosedError) throw error
       if (error instanceof GoogleError && error.failure.kind === 'http' && error.failure.status < 500) return classify(error, false)
       // The session knows whether the upload completed.
       const settled = await this.sessionState(session, input.token, video)

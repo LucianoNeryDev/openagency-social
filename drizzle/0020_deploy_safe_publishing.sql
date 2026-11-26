@@ -1,0 +1,5 @@
+ALTER TABLE "control_events" DROP CONSTRAINT "control_events_type";--> statement-breakpoint
+ALTER TABLE "webhooks" DROP CONSTRAINT "webhooks_event_types";--> statement-breakpoint
+ALTER TABLE "attempts" ADD COLUMN "sent_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "control_events" ADD CONSTRAINT "control_events_type" CHECK (type in ('drafts.available', 'messages.changed', 'replies.changed', 'jobs.changed'));--> statement-breakpoint
+ALTER TABLE "webhooks" ADD CONSTRAINT "webhooks_event_types" CHECK (cardinality(event_types) > 0 and event_types <@ array['post.published', 'post.failed', 'post.metrics.changed', 'channel.metrics.changed', 'comment.created', 'channel.post.created', 'channel.profile.changed', 'channel.status.changed', 'reply.sent', 'reply.failed', 'message.received', 'message.sent', 'message.failed', 'post.uncertain', 'post.cancelled']::text[]);

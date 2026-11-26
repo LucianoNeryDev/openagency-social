@@ -9,8 +9,10 @@ import type { Database } from '../src/db/client.js'
 import { channelActivity, webhookDeliveries, webhooks, type WebhookEventType, attempts, browserAccounts, channelCredentials, channelMetrics, channelMetricSamples, channels, events, jobs, media, postMetrics, postMetricSamples,
   postResponses, providerApps, responseChecks } from '../src/db/schema.js'
 import * as schema from '../src/db/schema.js'
-import { cancelJobs, listJobs, reconcileJob, submitJobs, type SubmitInput } from '../src/jobs/service.js'
-import { claimNext, executeClaimed, maxAttempts, sweep } from '../src/jobs/worker.js'
+import { cancelJobs, listJobs, reconcileJob, resolveJob, submitJobs, type SubmitInput } from '../src/jobs/service.js'
+import { claimNext, executeClaimed, interrupted, markSent, maxAttempts, requeueUnsent, sweep, Worker } from '../src/jobs/worker.js'
+import { publishingHealth } from '../src/jobs/health.js'
+import { AttemptClosedError } from '../src/platforms/types.js'
 import { maxImageBytes, mediaChunkBytes, mediaFileBytes, mediaSignature, publicMediaKey, readMedia, storeMedia } from '../src/media.js'
 import { collectDueMetrics, readMetricHistory, readMetrics } from '../src/metrics.js'
 import {
@@ -51,8 +53,12 @@ class FakeAdapter implements PlatformAdapter {
     if ('bad' in settings) throw new Error('bad settings')
     this.validated.push(media)
   }
+  /** Runs before the visible request, e.g. to hold the publish while a test stops the worker. */
+  beforeVisible: (input: PublishInput) => Promise<void> = async () => undefined
   async publish(_app: unknown, input: PublishInput) {
     this.published.push(input)
+    await this.beforeVisible(input)
+    await input.beforeVisible?.()
     return this.outcomes.shift() ?? { kind: 'published' as const, externalId: `post-${this.published.length}` }
   }
   async reconcile() { return this.reconcileOutcome }
@@ -421,19 +427,132 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(await reconcileJob(context, org, job!.id)).toMatchObject({ result: 'failed', job: { lastError: 'not_found_on_platform' } })
     })
 
-    it('turns attempts abandoned by a crash into uncertain jobs', async () => {
+    it('turns attempts abandoned by a crash after sending into uncertain jobs', async () => {
       const [channel] = await connect()
       const input = submission([channel!.id])
       await submitJobs(context, input)
       advance(60 * 60_000)
       const claimed = await claimNext(context)
       expect(claimed).not.toBeNull()
+      await markSent(context, claimed!.attemptId)
       advance(11 * 60_000)
       expect(await sweep(context)).toEqual([claimed!.jobId])
       expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'uncertain', lastError: 'abandoned' })
       // A confirmed result that arrives late still settles the job.
       await executeClaimed(context, claimed!)
       expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'published' })
+    })
+  })
+
+  describe('deploy-safe publishing', () => {
+    it('queues an attempt abandoned before sending again, without counting it', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      const claimed = await claimNext(context)
+      advance(11 * 60_000)
+      expect(await sweep(context)).toEqual([])
+      expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'queued', lastError: 'abandoned', attemptCount: 0 })
+      const [attempt] = await db.select().from(attempts).where(eq(attempts.id, claimed!.attemptId))
+      expect(attempt).toMatchObject({ outcome: 'failed_retryable', errorCode: 'abandoned', sentAt: null })
+      // The dead engine's late result cannot send any more: its attempt is closed.
+      await expect(markSent(context, claimed!.attemptId)).rejects.toBeInstanceOf(AttemptClosedError)
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'published', attemptCount: 1 })
+    })
+
+    it('an attempt closed by a stopping engine sends nothing and leaves its job queued', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      const claimed = await claimNext(context)
+      adapter.beforeVisible = async () => { expect(await requeueUnsent(context, [claimed!.attemptId], 'interrupted')).toHaveLength(1) }
+      expect(await executeClaimed(context, claimed!)).toBe(interrupted)
+      expect(adapter.outcomes).toEqual([])
+      expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'queued', lastError: 'interrupted', attemptCount: 0 })
+      const kinds = (await db.select().from(events).where(eq(events.organizationId, org)).orderBy(events.id)).map(row => row.kind)
+      expect(kinds).toEqual(['channel.connected', 'job.queued', 'job.running', 'job.requeued'])
+    })
+
+    it('never requeues an attempt that already sent its visible request', async () => {
+      const [channel] = await connect()
+      await submitJobs(context, submission([channel!.id]))
+      advance(60 * 60_000)
+      const claimed = await claimNext(context)
+      await markSent(context, claimed!.attemptId)
+      expect(await requeueUnsent(context, [claimed!.attemptId], 'interrupted')).toEqual([])
+    })
+
+    it('a stopping worker requeues a publish held before sending, within its grace', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      let release!: () => void
+      let held!: () => void
+      const reached = new Promise<void>(resolve => { held = resolve })
+      adapter.beforeVisible = () => new Promise<void>(resolve => { release = resolve; held() })
+      const worker = new Worker(context, { concurrency: 1, pollMs: 60_000 })
+      worker.start()
+      await reached
+      const started = Date.now()
+      await worker.stop(2_000)
+      expect(Date.now() - started).toBeLessThan(3_500)
+      release()
+      await new Promise(resolve => setTimeout(resolve, 200))
+      expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'queued', lastError: 'interrupted' })
+    }, 20_000)
+
+    it('readiness reports a stalled worker and a due job waiting 15 minutes', async () => {
+      const [channel] = await connect()
+      await submitJobs(context, submission([channel!.id]))
+      expect(await publishingHealth(context, undefined)).toMatchObject({ publishing: 'off', oldestDueJob: null })
+      const fresh = { enabled: true, lastTickAt: now, pollMs: 5_000 }
+      advance(60 * 60_000)
+      expect(await publishingHealth(context, { ...fresh, lastTickAt: now })).toMatchObject({ publishing: 'ok', oldestDueJob: { waitingSeconds: 0 } })
+      advance(15 * 60_000)
+      expect(await publishingHealth(context, { ...fresh, lastTickAt: now })).toMatchObject({ publishing: 'late', oldestDueJob: { waitingSeconds: 900 } })
+      expect(await publishingHealth(context, { ...fresh, lastTickAt: new Date(now.getTime() - 61_000) })).toMatchObject({ publishing: 'stalled' })
+    })
+  })
+
+  describe('resolving uncertain jobs', () => {
+    async function uncertainJob() {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      adapter.outcomes = [{ kind: 'uncertain', code: 'response_lost', detail: 'timeout' }]
+      await runDue()
+      return { channel: channel!, input, job: (await listJobs(context, org, input.postId)).jobs[0]! }
+    }
+
+    it('a person settles it as published with the platform ID, or as not published', async () => {
+      const { job } = await uncertainJob()
+      await expect(resolveJob(context, job.id, { organizationId: 'other-org', outcome: 'not_published', resolvedByUserId: 'u1' })).rejects.toMatchObject({ code: 'not_found' })
+      expect(await resolveJob(context, job.id, { organizationId: org, outcome: 'published', externalId: '123_456', url: 'https://www.facebook.com/123_456', resolvedByUserId: 'u1' }))
+        .toMatchObject({ job: { state: 'published', receipt: { externalId: '123_456', settledBy: 'operator' } } })
+      await expect(resolveJob(context, job.id, { organizationId: org, outcome: 'not_published', resolvedByUserId: 'u1' })).rejects.toMatchObject({ code: 'not_uncertain' })
+      const [event] = await db.select().from(events).where(eq(events.kind, 'job.resolved'))
+      expect(event).toMatchObject({ jobId: job.id, detail: { outcome: 'published', resolvedByUserId: 'u1' } })
+
+      const second = await uncertainJob()
+      expect(await resolveJob(context, second.job.id, { organizationId: org, outcome: 'not_published', resolvedByUserId: 'u1' }))
+        .toMatchObject({ job: { state: 'failed', lastError: 'resolved_not_published' } })
+    })
+
+    it('refuses a platform ID another post of the channel already has', async () => {
+      const first = await uncertainJob()
+      await resolveJob(context, first.job.id, { organizationId: org, outcome: 'published', externalId: 'same', resolvedByUserId: 'u1' })
+      const input = submission([first.channel.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      adapter.outcomes = [{ kind: 'uncertain', code: 'response_lost', detail: 'timeout' }]
+      await runDue()
+      const [job] = (await listJobs(context, org, input.postId)).jobs
+      await expect(resolveJob(context, job!.id, { organizationId: org, outcome: 'published', externalId: 'same', resolvedByUserId: 'u1' })).rejects.toMatchObject({ code: 'receipt_taken' })
     })
   })
 

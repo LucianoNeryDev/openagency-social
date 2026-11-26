@@ -104,9 +104,28 @@ or `>`. A vertical video up to three minutes long becomes a Short.
 | `POST /v1/jobs/cancel` | `{organizationId, postId, revision}` → per job `cancelled`, or `too_late` with its current state. |
 | `GET /v1/jobs?organizationId=&postId=` | Jobs with state, attempt count, receipt and last error. |
 | `POST /v1/jobs/:id/reconcile` | `{organizationId}`. Reads the platform for an `uncertain` job: `published`, `failed`, `ambiguous` or `too_early`. |
+| `POST /v1/jobs/:id/resolve` | A person settles an `uncertain` job: `{organizationId, outcome: "published", externalId, url?, resolvedByUserId}` (the post's platform ID, so metrics and replies keep working; refused with `receipt_taken` when another post of the channel has it) or `{organizationId, outcome: "not_published", resolvedByUserId}` (`failed`, `resolved_not_published`; submit a new revision to post it). Any other state: `409 not_uncertain`. |
 
 Job states: `queued`, `running`, `published`, `failed`, `uncertain`,
-`cancelled`. An `uncertain` job is never retried; only reconcile settles it.
+`cancelled`. An `uncertain` job is never retried; reconcile or a person
+(resolve) settles it. A receipt's `settledBy` is `worker`, `reconcile` or
+`operator`.
+
+Each attempt records `sentAt`, when the request that can make the post
+visible went out (Facebook's feed post, Instagram's `media_publish`, the
+last chunk of a YouTube upload, the submission to the browser runner). An
+attempt that ends without it published nothing: when its engine stops or
+dies, the job is queued again at once, and that attempt does not count
+against its tries. Only an attempt that sent and got no answer makes the job
+`uncertain`. A job more than an hour past `publishAt` is not started any
+more and fails as `too_late`.
+
+`GET /readyz` (no token) answers 200 while the database does, with
+`publishing`: `ok`, `stalled` (the worker has not finished a pass for four
+poll intervals, at least a minute), `late` (a due job has waited 15 minutes
+to start) or `off` (no worker in this process); `worker.lastTickAt`; and
+`oldestDueJob` (`notBefore`, `waitingSeconds`) or null. Monitoring alerts on
+anything but `ok`.
 
 ## Post metrics
 
@@ -688,6 +707,7 @@ allowed: the operator sets it).
 | `drafts.available` | A decision and draft were stored | `GET /v1/drafts/outbox` |
 | `messages.changed` | An outgoing message became `sent`, `failed`, `uncertain` or was cancelled by a pause | `GET /v1/tenants/:org/messages` |
 | `replies.changed` | The same for a comment reply | `GET /v1/tenants/:org/replies` |
+| `jobs.changed` | A job changed state: published, failed, uncertain, cancelled, settled by reconcile or a person, or queued again | `GET /v1/jobs` for the organization's posts |
 
 Each is a `POST` with a JSON body and these headers:
 
@@ -734,6 +754,8 @@ happens. At most 10 webhooks per tenant.
 | --- | --- | --- |
 | `post.published` | A job is published (by the worker or by reconcile). | `jobId, postId, revision, channelId, platform, kind, externalId, url, publishedAt` |
 | `post.failed` | A job fails for good. A failure that will be retried sends nothing. | `jobId, postId, revision, channelId, platform, kind, code` |
+| `post.uncertain` | A job may or may not have published: its request got no answer, or its engine died after sending it. Reconcile or resolve settles it. | as `post.failed` |
+| `post.cancelled` | A queued job was cancelled, or not started because publishing is paused. | as `post.failed` |
 | `post.metrics.changed` | A post's numbers moved since the last read (views, reach, likes, comments, shares, saves). | `jobId, postId, revision, channelId, platform, kind, externalId, url, values, previous, changes, unavailable, collectedAt` |
 | `channel.metrics.changed` | An account's numbers moved: followers (YouTube subscribers), following, posts, views, reach, profile views, total views. | `channelId, platform, kind, name, values, previous, changes, unavailable, collectedAt` |
 | `comment.created` | A comment or reply is stored for the first time. Edits send nothing. | `responseId, jobId, postId, channelId, platform, externalId, parentExternalId, author: {name, handle}, text, publishedAt, url, fromChannel` |
@@ -752,7 +774,7 @@ account's first read; `changes` holds the difference of each number present
 in both reads (`{"likes": 4}`). `fromChannel` is true for the brand's own
 replies. Platforms give counts, not who liked or subscribed. Browser channels
 have no metrics, comments, profile or post reads, so they send only
-`post.published`, `post.failed` and `channel.status.changed`.
+`post.*` events and `channel.status.changed`.
 
 `channel.post.created`: `type` is `video`, `reel`, `image`, `carousel`, `text`,
 `link` or `other`; `text` is the caption, message or title, at most 500

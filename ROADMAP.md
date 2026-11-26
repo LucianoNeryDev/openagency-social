@@ -25,8 +25,14 @@ Updated 2026-11-26.
   Facebook Pages, Instagram and YouTube within per-channel limits.
 - Direct messages on Facebook Pages and Instagram: conversations read, and
   messages sent once within the 24-hour window and per-channel limits.
-- Signed webhooks for an organization's own applications: published and failed
-  posts, moving numbers, new comments, posts made elsewhere, profile edits,
+- Deploy-safe publishing: attempts record when the request that makes the
+  post visible was sent, a stopping or dead engine's unsent attempts are
+  queued again instead of turning uncertain, and shutdown waits a bounded
+  grace ([docs/deploy.md](docs/deploy.md)). A person settles an uncertain job
+  (`POST /v1/jobs/:id/resolve`). Failures are logged, `jobs.changed` tells
+  Portal, and readiness reports whether publishing keeps up.
+- Signed webhooks for an organization's own applications: published, failed,
+  uncertain and cancelled posts, moving numbers, new comments, posts made elsewhere, profile edits,
   channel status, replies and messages.
 - Postiz replaced (2026-11-02), with an operator import for the channels that
   came from it ([ADR 0001](docs/adr/0001-own-engine-replaces-postiz.md)).
@@ -45,13 +51,6 @@ Updated 2026-11-26.
   change, so Portal reads them at once instead of on its schedule.
 
 - Publishing that agencies can rely on:
-  - A person settles an uncertain job (`POST /v1/jobs/:id/resolve`), as for
-    replies and messages. Today reconcile can only answer `ambiguous` when
-    two posts share a caption, and re-submitting returns the stuck job.
-  - Deploy-safe publishing: each attempt records when the call that makes
-    the post visible was sent; attempts that never sent it are queued again
-    after a restart instead of marked uncertain; shutdown waits a bounded
-    time, and [docs/deploy.md](docs/deploy.md) gives the stop grace to set.
   - Revoked logins found before a post is due: a daily token check, and the
     background readers mark a channel `needs_reauth` on an invalid token as
     publishing does.
@@ -60,11 +59,6 @@ Updated 2026-11-26.
   - A failed media download by Instagram retried instead of rejected;
     `PUBLIC_MEDIA_URL` checked at start and on submit; a browser job without a
     runner configured fails instead of turning uncertain.
-  - Failures visible: failed and uncertain attempts logged as warnings or
-    errors, claim-time failures (`too_late`, `channel_inactive`) logged, a
-    `jobs.changed` event to Portal, webhooks for uncertain and cancelled
-    jobs, and readiness that reports the worker's liveness and the oldest due
-    job.
   - Rate limits: Meta's usage headers read, retries that wait for the limit's
     window, and the app-wide pause the readers set honoured by publishing.
   - A missing permission for one action no longer marks the whole channel as

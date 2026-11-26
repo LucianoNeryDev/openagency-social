@@ -99,9 +99,24 @@ export interface PublishInput {
   browserAccount?: BrowserAccountTarget
   /** Long-running drivers call this while they wait, so the sweeper leaves the attempt alone. */
   heartbeat?: () => Promise<void>
+  /**
+   * Called right before the request that can make the post visible, outside
+   * any error handling of that request. It throws AttemptClosedError when the
+   * attempt was closed meanwhile (the engine is stopping and queued the job
+   * again): the adapter must then send nothing and let the error through.
+   */
+  beforeVisible?: () => Promise<void>
   content: string
   media: MediaFile[]
   settings: Record<string, unknown>
+}
+
+/** The attempt was closed before its visible request: nothing was sent, and the job is already queued again. */
+export class AttemptClosedError extends Error {
+  constructor() {
+    super('The attempt was closed before its visible request')
+    this.name = 'AttemptClosedError'
+  }
 }
 
 export type PublishOutcome =
