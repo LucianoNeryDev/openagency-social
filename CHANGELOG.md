@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Deploy-safe publishing: attempts record `sentAt`, when the request that can
+  make the post visible went out (migration `0020`, a nullable column).
+  Adapters call `beforeVisible` right before it; a closed attempt sends
+  nothing. A stopping engine waits `SHUTDOWN_GRACE_MS` (default 25 s), and
+  half way queues again the jobs whose attempts had not sent; a dead
+  engine's unsent attempts are queued again by the sweeper instead of turning
+  `uncertain`. Interrupted attempts do not count against a job's tries.
+  docs/deploy.md gives the stop timeout to set.
+- A person settles an uncertain job: `POST /v1/jobs/:id/resolve` with
+  `published` (and the platform ID) or `not_published`, recorded with who
+  decided; receipts may be `settledBy: operator`.
+- Failures visible: failed attempts are logged at `warn`, uncertain ones at
+  `error`, claim-time failures (`too_late`, `channel_inactive`) at `warn`; a
+  `jobs.changed` control event after any job state change; webhooks
+  `post.uncertain` and `post.cancelled`; `/readyz` reports `publishing`
+  (`ok`, `stalled`, `late`, `off`), the worker's last pass and the oldest due
+  job, and `answering` (`failing` after two failed AI calls in an hour with
+  none drafted).
+
 - Risk gate for automatic answers ([ADR 0004](docs/adr/0004-engine-drafts-replies.md#amendment-risk-gate)):
   the decision request also asks `risk` (`low`, `medium`, `high`) in the
   same call, or alone for `never` and `always` cases and without a policy.

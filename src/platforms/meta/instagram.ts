@@ -103,6 +103,7 @@ export class InstagramPublisher {
     }
 
     let published: z.infer<typeof createdSchema>
+    await input.beforeVisible?.()
     try {
       published = createdSchema.parse(await this.graph.request('POST', `/${user}/media_publish`, { ...call, form: { creation_id: containerId } }))
     } catch (error) {

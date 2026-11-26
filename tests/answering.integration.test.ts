@@ -23,6 +23,7 @@ import { messageDigest, messageRequestKey, submitMessage, type MessageSubmission
 import type { PlatformAdapter } from '../src/platforms/types.js'
 import { replyDigest, replyRequestKey, submitReply, type ReplySubmission } from '../src/replies.js'
 import { applyRetention } from '../src/retention.js'
+import { answeringHealth } from '../src/jobs/health.js'
 import { postgresFixture } from './fixtures/postgres.js'
 
 const required = process.env.REQUIRE_DATABASE_TESTS === 'true'
@@ -68,8 +69,10 @@ class FakeDecision implements DecisionModel {
 class FakeDrafter implements DraftModel {
   inputs: DraftInput[] = []
   next?: Partial<DraftOutput>
+  failing = false
   async draft(input: DraftInput) {
     this.inputs.push(input)
+    if (this.failing) throw new Error('credit balance too low')
     const answered = input.kind === 'message' ? input.history?.at(-1)?.text : input.comment?.text
     const output: DraftOutput = { needsReply: true, reply: `Reply: ${answered ?? 'nothing'}`, language: 'en', summary: 'A question.', flags: [], ...this.next }
     return { model: 'claude-haiku-5-5', output }
@@ -175,6 +178,22 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
     advance(hour)
     expect(await put()).toMatchObject({ enabledAt: { messages: again.enabledAt.messages, comments: now.toISOString() } })
     expect(await getAnswering(context, org)).toMatchObject({ version })
+  })
+
+  it('readiness says answering is failing after two failed drafts in an hour with none drafted', async () => {
+    const page = await channel()
+    await put()
+    expect(await answeringHealth(context)).toMatchObject({ answering: 'ok', answeringLastHour: { failed: 0, drafted: 0 } })
+    drafter.failing = true
+    for (const text of ['Do you ship to Spain?', 'And to Portugal?']) {
+      const chat = await conversation(page)
+      await message(chat, text)
+      await runAnswering(context)
+    }
+    expect(await answeringHealth(context)).toMatchObject({ answering: 'failing', answeringLastHour: { failed: 2, drafted: 0 } })
+    advance(61 * minute)
+    expect(await answeringHealth(context)).toMatchObject({ answering: 'ok' })
+    expect(await answeringHealth({ ...context, draftModel: undefined })).toMatchObject({ answering: 'off' })
   })
 
   it('drafts new DMs once, from the switch-on, coalescing a burst and superseding older drafts', async () => {

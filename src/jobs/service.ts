@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { z } from 'zod'
 import { and, desc, eq, inArray, ne, notInArray, sql } from 'drizzle-orm'
 import { lockControls, readPublishing } from '../channels.js'
 import { adapterFor, clock, recordEvent, type EngineContext } from '../context.js'
@@ -99,8 +100,10 @@ export async function cancelJobs(context: EngineContext, organizationId: string,
     const results = []
     for (const job of rows) {
       if (job.state === 'queued') {
-        await transaction.update(jobs).set({ state: 'cancelled', lastError: 'cancelled', updatedAt: clock(context) }).where(eq(jobs.id, job.id))
+        const now = clock(context)
+        const [updated] = await transaction.update(jobs).set({ state: 'cancelled', lastError: 'cancelled', updatedAt: now }).where(eq(jobs.id, job.id)).returning()
         await recordEvent(transaction, { organizationId, kind: 'job.cancelled', jobId: job.id, channelId: job.channelId })
+        await emitJobOutcome(transaction, updated!, now)
         results.push({ jobId: job.id, channelId: job.channelId, state: 'cancelled' as const, result: 'cancelled' as const })
       } else {
         results.push({ jobId: job.id, channelId: job.channelId, state: job.state, result: job.state === 'cancelled' ? 'cancelled' as const : 'too_late' as const })
@@ -147,6 +150,41 @@ export async function reconcileJob(context: EngineContext, organizationId: strin
     await recordEvent(transaction, { organizationId, kind: `job.reconciled.${updated.state}`, jobId: job.id, channelId: job.channelId })
     await emitJobOutcome(transaction, updated, now)
     return { job: jobView(updated), result: updated.state }
+  })
+}
+
+export const resolveJobSchema = z.discriminatedUnion('outcome', [
+  z.strictObject({ organizationId: z.string().min(1).max(200), outcome: z.literal('published'), externalId: z.string().min(1).max(200),
+    url: z.url({ protocol: /^https$/ }).max(2_000).optional(), resolvedByUserId: z.string().min(1).max(200) }),
+  z.strictObject({ organizationId: z.string().min(1).max(200), outcome: z.literal('not_published'), resolvedByUserId: z.string().min(1).max(200) }),
+])
+
+/**
+ * A person settles an uncertain job, as for replies and messages, when
+ * reconcile cannot (two posts share a caption, the platform hides the post,
+ * or the person simply looked). `published` takes the post's platform ID, so
+ * metrics and replies keep working; `not_published` fails the job, and the
+ * post can be submitted again as a new revision. Recorded with who decided.
+ */
+export async function resolveJob(context: EngineContext, jobId: string, input: z.infer<typeof resolveJobSchema>) {
+  return context.db.transaction(async transaction => {
+    const now = clock(context)
+    const [job] = await transaction.select().from(jobs).where(and(eq(jobs.organizationId, input.organizationId), eq(jobs.id, jobId))).for('update').limit(1)
+    if (!job) throw notFound('Job')
+    if (job.state !== 'uncertain') throw conflict('not_uncertain', 'Only an uncertain job can be resolved', { state: job.state })
+    if (input.outcome === 'published') {
+      const [taken] = await transaction.select({ id: jobs.id }).from(jobs)
+        .where(and(eq(jobs.channelId, job.channelId), eq(jobs.state, 'published'), ne(jobs.id, job.id), sql`${jobs.receipt}->>'externalId' = ${input.externalId}`)).limit(1)
+      if (taken) throw conflict('receipt_taken', 'Another post of this channel already has that platform ID')
+    }
+    const values = input.outcome === 'published'
+      ? { state: 'published' as const, receipt: { externalId: input.externalId, ...(input.url ? { url: input.url } : {}), settledBy: 'operator' as const }, lastError: null }
+      : { state: 'failed' as const, lastError: 'resolved_not_published' }
+    const [updated] = await transaction.update(jobs).set({ ...values, updatedAt: now }).where(eq(jobs.id, job.id)).returning()
+    await recordEvent(transaction, { organizationId: input.organizationId, kind: 'job.resolved', jobId: job.id, channelId: job.channelId,
+      detail: { outcome: input.outcome, resolvedByUserId: input.resolvedByUserId } })
+    await emitJobOutcome(transaction, updated!, now)
+    return { job: jobView(updated!) }
   })
 }
 
