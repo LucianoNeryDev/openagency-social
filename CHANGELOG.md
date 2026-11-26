@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Rate limits: the Graph client reads Meta's `X-App-Usage` and
+  `X-Business-Use-Case-Usage` headers on every answer. A background read
+  (post and account numbers, comments, account activity) that sees any
+  figure at 90% or more, or a time to regain access, keeps its result and
+  pauses the channel (the whole app for the app's own figures) for Meta's
+  estimate or 15 minutes, before Meta starts refusing. A refused read pauses
+  until `estimated_time_to_regain_access` when Meta gives it. A rate-limited
+  publish is retried when the limit lifts (`retryAt`), and any retry is
+  scheduled no later than 59 minutes past `publishAt`, as a last try instead
+  of failing `too_late`. A job whose channel is paused for a rate limit is
+  not started until the pause ends (`notBefore` moves, event `job.deferred`),
+  unless that is more than 59 minutes past `publishAt`: then it is tried.
 - A missing permission for one action no longer marks the whole channel as
   needing a new login: Meta's codes 10 and 200-299 and YouTube's
   `insufficientPermissions`, `forbidden` and `youtubeSignupRequired` fail the

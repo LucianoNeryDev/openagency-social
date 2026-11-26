@@ -139,6 +139,18 @@ describe('Meta publish', () => {
     }
   })
 
+  it('retries a rate-limited publish when Meta says access returns', async () => {
+    const before = Date.now()
+    const { adapter } = fakeGraph([() => new Response(JSON.stringify({ error: { message: 'limit', code: 32 } }), { status: 400, headers: {
+      'x-business-use-case-usage': JSON.stringify({ 1000000000000101: [{ type: 'pages', call_count: 100, total_time: 1, total_cputime: 1, estimated_time_to_regain_access: 12 }] }) } })])
+    const outcome = await adapter.publish(app, input())
+    expect(outcome).toMatchObject({ kind: 'failed', retryable: true, code: 'rate_limited' })
+    const retry = outcome.kind === 'failed' ? outcome.retryAt : undefined
+    expect(retry!.getTime()).toBeGreaterThanOrEqual(before + 12 * 60_000)
+    // Without an estimate the worker's backoff decides.
+    expect(await fakeGraph([graphError(400, 32)]).adapter.publish(app, input())).not.toHaveProperty('retryAt')
+  })
+
   it('rejects settings it does not know', () => {
     const { adapter } = fakeGraph([])
     const image = [jpegInfo(1080, 1080)]
@@ -416,6 +428,45 @@ describe('Meta account metrics', () => {
     }
     const { adapter } = fakeGraph([graphError(500, 2)])
     await expect(adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now })).rejects.not.toBeInstanceOf(RateLimited)
+  })
+  const withUsage = (body: unknown, usage: Record<string, unknown>, status = 200) => () => new Response(JSON.stringify(body), { status,
+    headers: { 'content-type': 'application/json', ...Object.fromEntries(Object.entries(usage).map(([key, value]) => [key, JSON.stringify(value)])) } })
+
+  it('keeps a read\'s result and asks to slow down when Meta\'s usage reaches 90%', async () => {
+    const { adapter } = fakeGraph([
+      withUsage({ id: '1000000000000101', followers_count: 1520 }, { 'x-app-usage': { call_count: 92, total_time: 10, total_cputime: 10 } }),
+      withUsage({ data: [] }, { 'x-business-use-case-usage': { 1000000000000101: [{ type: 'pages', call_count: 40, total_time: 5, total_cputime: 5,
+        estimated_time_to_regain_access: 0 }] } }),
+    ])
+    const limits: RateLimited[] = []
+    const result = await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now, slowDown: limit => limits.push(limit) })
+    expect(result.values.followers).toBe(1520)
+    expect(limits).toHaveLength(1)
+    expect(limits[0]!.scope).toBe('app')
+  })
+
+  it('stays quiet while usage is low', async () => {
+    const { adapter } = fakeGraph([withUsage({ followers_count: 3 }, { 'x-app-usage': { call_count: 89, total_time: 89, total_cputime: 89 } }), json({ data: [] })])
+    const limits: RateLimited[] = []
+    await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now, slowDown: limit => limits.push(limit) })
+    expect(limits).toEqual([])
+  })
+
+  it('pauses a refused read until Meta says access returns', async () => {
+    const before = Date.now()
+    const { adapter } = fakeGraph([withUsage({ error: { message: 'limit', code: 80001 } }, { 'x-business-use-case-usage': { 1000000000000101: [
+      { type: 'pages', call_count: 100, total_time: 20, total_cputime: 20, estimated_time_to_regain_access: 25 }] } }, 400)])
+    const error = await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now }).catch((value: unknown) => value)
+    expect(error).toBeInstanceOf(RateLimited)
+    expect((error as RateLimited).scope).toBe('channel')
+    expect((error as RateLimited).until!.getTime()).toBeGreaterThanOrEqual(before + 25 * 60_000)
+    expect((error as RateLimited).until!.getTime()).toBeLessThan(Date.now() + 26 * 60_000)
+  })
+
+  it('a refusal while the app\'s own usage is full pauses the whole app', async () => {
+    const { adapter } = fakeGraph([withUsage({ error: { message: 'limit', code: 613 } }, { 'x-app-usage': { call_count: 100, total_time: 40, total_cputime: 40 } }, 400)])
+    const error = await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now }).catch((value: unknown) => value)
+    expect((error as RateLimited).scope).toBe('app')
   })
 })
 

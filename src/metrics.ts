@@ -4,7 +4,7 @@ import { channelMetrics, channels, jobs, postMetrics, postMetricSamples, type Pl
 import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
 import type { CallBudget } from './budget.js'
-import { notPaused, pauseForRateLimit } from './pause.js'
+import { notPaused, pauseForRateLimit, SlowDown } from './pause.js'
 import { RateLimited, ReauthRequired } from './platforms/types.js'
 import { emitWebhookEvents, metricChanges, watchedPostMetricsIntervalMs, watchedPostMetricsWindowMs, webhookWatches } from './webhooks.js'
 import { markNeedsReauth } from './token-check.js'
@@ -64,9 +64,10 @@ export async function collectDueMetrics(context: EngineContext, limit = metricsB
     const base = { jobId: job.id, organizationId: job.organizationId, channelId: channel.id }
     try {
       const { app, token } = await channelDriver(context, context.db, channel)
+      const slowDown = new SlowDown()
       const result = await context.adapters.get(channel.platform)!.metrics!(app, {
         channel: { id: channel.id, kind: channel.kind, externalId: channel.externalId }, token, externalId: job.receipt!.externalId,
-        spendCall: () => budget?.spend(channel.platform),
+        spendCall: () => budget?.spend(channel.platform), slowDown: slowDown.note,
       })
       const finished = clock(context)
       await context.db.transaction(async transaction => {
@@ -84,6 +85,8 @@ export async function collectDueMetrics(context: EngineContext, limit = metricsB
               unavailable: values.unavailable, collectedAt: finished.toISOString() }] })
         }
       })
+      // The read worked, but the platform's usage says to slow down: the channel waits before Meta starts refusing.
+      await slowDown.apply(context.db, channel, finished)
       collected++
     } catch (error) {
       if (error instanceof RateLimited) {

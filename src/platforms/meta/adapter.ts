@@ -8,7 +8,7 @@ import type {
   PublishInput, PublishOutcome, ReconcileInput, ReconcileOutcome, ReplyInput, ReplyOutcome, ReplyRules, ReplyTargetInput, ReplyTargetOutcome, ResolvedProviderApp,
   ResponsesInput, ResponsesResult, SendMessageInput, SendMessageOutcome,
 } from '../types.js'
-import { classify, guardRateLimit } from './classify.js'
+import { classify, guardRateLimit, watchUsage } from './classify.js'
 import { GraphClient, spendAfterFirst, type GraphOptions } from './graph.js'
 import { facebookActivity, instagramActivity } from './activity.js'
 import { InstagramPublisher, validateInstagram, type ContainerPoll } from './instagram.js'
@@ -219,14 +219,14 @@ export class MetaAdapter implements PlatformAdapter {
 
   async metrics(app: ResolvedProviderApp | null, input: MetricsInput): Promise<MetricsResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall) }
+    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramMediaMetrics(this.graph, call, input.externalId))
     return guardRateLimit(() => facebookPostMetrics(this.graph, call, input.externalId))
   }
 
   async accountMetrics(app: ResolvedProviderApp | null, input: AccountMetricsInput): Promise<AccountMetricsResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall) }
+    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }
     const now = input.now ?? new Date()
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramAccountMetrics(this.graph, call, input.channel.externalId, now))
     return guardRateLimit(() => facebookPageMetrics(this.graph, call, input.channel.externalId, now))
@@ -234,14 +234,14 @@ export class MetaAdapter implements PlatformAdapter {
 
   async accountActivity(app: ResolvedProviderApp | null, input: AccountActivityInput): Promise<AccountActivityResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall) }
+    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramActivity(this.graph, call, input.channel.externalId, { login: false }))
     return guardRateLimit(() => facebookActivity(this.graph, call, input.channel.externalId))
   }
 
   async responses(app: ResolvedProviderApp | null, input: ResponsesInput): Promise<ResponsesResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret }
+    const call = { token: input.token, appSecret: app.secret, ...watchUsage(input.slowDown) }
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramResponses(this.graph, call, input, 'instagram_manage_comments'))
     return guardRateLimit(() => facebookResponses(this.graph, call, input))
   }

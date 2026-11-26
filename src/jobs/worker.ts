@@ -18,11 +18,17 @@ import { applyRetention, retentionIntervalMs } from '../retention.js'
 import { checkDueTokens, tokenCheckIntervalMs } from '../token-check.js'
 import { answeringIntervalMs, runAnswering } from '../answering/pipeline.js'
 import { AttemptClosedError, type PublishOutcome } from '../platforms/types.js'
+import { pausedUntil } from '../pause.js'
 import { changeChannelStatus, deliverDueWebhooks, emitJobOutcome, webhooksIntervalMs } from '../webhooks.js'
 
 export const maxAttempts = 5
 /** A job later than this after publishAt is not started any more. */
 export const maxLatenessMs = 60 * 60_000
+/**
+ * The latest a job is scheduled to start, after publishAt: a minute inside
+ * the lateness limit, so a claim a poll later still finds it in time.
+ */
+export const lastStartMs = maxLatenessMs - 60_000
 /** An attempt still open this long after its start or last heartbeat is treated as lost. */
 export const abandonedAfterMs = 10 * 60_000
 /** A queued job this long past its time has not started: readiness reports publishing as late. */
@@ -70,6 +76,16 @@ export async function claimNext(context: EngineContext, lanes: readonly JobLane[
         const [updated] = await transaction.update(jobs).set({ state, lastError: reason, updatedAt: now }).where(eq(jobs.id, job.id)).returning()
         await recordEvent(transaction, { organizationId: job.organizationId, kind: `job.${state}`, jobId: job.id, channelId: job.channelId, detail: { reason } })
         await emitJobOutcome(transaction, updated!, now)
+        return 'skipped' as const
+      }
+      // A rate limit the readers set (on the channel or its whole app) holds the job back until it ends,
+      // unless that would make the job too late: then it is tried now.
+      const limitedUntil = await pausedUntil(transaction, job.channelId, now)
+      if (limitedUntil && limitedUntil.getTime() <= job.publishAt.getTime() + lastStartMs) {
+        log('info', 'job held back by a rate limit', { jobId: job.id, channelId: job.channelId, until: limitedUntil.toISOString() })
+        await transaction.update(jobs).set({ notBefore: limitedUntil, updatedAt: now }).where(eq(jobs.id, job.id))
+        await recordEvent(transaction, { organizationId: job.organizationId, kind: 'job.deferred', jobId: job.id, channelId: job.channelId,
+          detail: { reason: 'rate_limited', until: limitedUntil.toISOString() } })
         return 'skipped' as const
       }
       const [attempt] = await transaction.insert(attempts).values({ jobId: job.id, startedAt: now }).returning({ id: attempts.id })
@@ -169,6 +185,16 @@ export function retryDelayMs(attemptCount: number) {
   return Math.min(60_000 * 2 ** Math.max(0, attemptCount - 1), 15 * 60_000)
 }
 
+/**
+ * When a retryable failure is tried again: when the platform said its rate
+ * limit lifts, or after the backoff; never past the job's last start inside
+ * the lateness limit, where it gets one last try instead of failing too late.
+ */
+export function retryAt(job: { publishAt: Date, attemptCount: number }, outcome: { retryAt?: Date }, now: Date) {
+  const wanted = outcome.retryAt?.getTime() ?? now.getTime() + retryDelayMs(job.attemptCount)
+  return new Date(Math.max(now.getTime(), Math.min(wanted, job.publishAt.getTime() + lastStartMs)))
+}
+
 export async function settleAttempt(context: EngineContext, claimed: ClaimedJob, outcome: PublishOutcome) {
   await context.db.transaction(async transaction => {
     const now = clock(context)
@@ -192,7 +218,7 @@ export async function settleAttempt(context: EngineContext, claimed: ClaimedJob,
     } else if (outcome.kind === 'uncertain') {
       values = { state: 'uncertain', lastError: outcome.code }
     } else if (outcome.retryable && job.attemptCount < maxAttempts) {
-      values = { state: 'queued', notBefore: new Date(now.getTime() + retryDelayMs(job.attemptCount)), lastError: outcome.code }
+      values = { state: 'queued', notBefore: retryAt(job, outcome, now), lastError: outcome.code }
     } else {
       values = { state: 'failed', lastError: outcome.retryable ? `retries_exhausted:${outcome.code}` : outcome.code }
     }

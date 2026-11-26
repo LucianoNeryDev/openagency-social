@@ -8,6 +8,9 @@ Updated 2026-11-26.
 
 ## Done
 
+- Rate limits: Meta's usage headers read, so reads pause before Meta
+  refuses them; rate-limited publishes retried when the limit lifts; and
+  publishing holds a job back while its channel or app is paused.
 - The platform access each feature needs, documented
   ([docs/platform-access.md](docs/platform-access.md)).
 - A missing permission for one action fails that job, without asking the
@@ -60,8 +63,6 @@ Updated 2026-11-26.
   change, so Portal reads them at once instead of on its schedule.
 
 - Publishing that agencies can rely on:
-  - Rate limits: Meta's usage headers read, retries that wait for the limit's
-    window, and the app-wide pause the readers set honoured by publishing.
   - Videos checked on submit (size, duration, codec) instead of failing
     after minutes of processing.
   - Posts cancelled by a pause can be brought back when it is lifted.

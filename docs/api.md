@@ -120,6 +120,15 @@ against its tries. Only an attempt that sent and got no answer makes the job
 `uncertain`. A job more than an hour past `publishAt` is not started any
 more and fails as `too_late`.
 
+Rate limits: a retryable failure is tried again after 1, 2, 4 and 8
+minutes, or, for a rate limit whose end Meta gives
+(`estimated_time_to_regain_access`), when it ends; never later than 59
+minutes past `publishAt`, which is the last try. A job whose channel the
+readers have paused for a rate limit (below) is not started until the pause
+ends: its `notBefore` moves to the end, recorded as `job.deferred`, and the
+job stays `queued`. When the pause would end more than 59 minutes past
+`publishAt`, the job is tried at once instead.
+
 `GET /readyz` (no token) answers 200 while the database does, with
 `publishing`: `ok`, `stalled` (the worker has not finished a pass for four
 poll intervals, at least a minute), `late` (a due job has waited 15 minutes
@@ -183,9 +192,14 @@ minutes for a week, hourly for a month, every 6 hours until day 90, then stops;
 YouTube runs slower (10 min, 30 min, 3 h, 12 h) to spare the project's daily
 quota. A watched post is read about every 30 seconds (2 minutes on YouTube); many
 watched posts on one channel share its checks, so each is read less often. A
-platform rate limit pauses every read on the channel for an hour; an app-wide
+platform rate limit pauses every read on the channel for an hour, or until
+Meta's `estimated_time_to_regain_access`; an app-wide
 limit pauses every channel on that app (YouTube's daily quota until midnight
-Pacific time). A missing permission is reported and asked about
+Pacific time). The readers also pause before Meta refuses: when a read's
+`X-App-Usage` reaches 90% of any figure, every channel on the app waits 15
+minutes; when its `X-Business-Use-Case-Usage` does, or gives a time to
+regain access, the channel waits that long (15 minutes without one). The read
+that saw it keeps its result. Publishing honours these pauses (see Jobs). A missing permission is reported and asked about
 again daily. Responses are deleted 180 days after the post's publish time, and
 at once when the channel is disabled. Only the text, the author's display name
 or username, counts, times and the comment's link are stored.

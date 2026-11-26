@@ -10,7 +10,8 @@ import { channelActivity, webhookDeliveries, webhooks, type WebhookEventType, at
   postResponses, providerApps, responseChecks } from '../src/db/schema.js'
 import * as schema from '../src/db/schema.js'
 import { cancelJobs, listJobs, reconcileJob, resolveJob, submitJobs, type SubmitInput } from '../src/jobs/service.js'
-import { claimNext, executeClaimed, interrupted, markSent, maxAttempts, requeueUnsent, settleAttempt, sweep, Worker } from '../src/jobs/worker.js'
+import { claimNext, executeClaimed, interrupted, lastStartMs, markSent, maxAttempts, requeueUnsent, settleAttempt, sweep, Worker } from '../src/jobs/worker.js'
+import { pauseForRateLimit } from '../src/pause.js'
 import { publishingHealth } from '../src/jobs/health.js'
 import { AttemptClosedError } from '../src/platforms/types.js'
 import { maxImageBytes, mediaChunkBytes, mediaFileBytes, mediaSignature, publicMediaKey, readMedia, storeMedia } from '../src/media.js'
@@ -390,6 +391,57 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(await claimNext(context)).toBeNull()
       expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'failed', lastError: 'too_late' })
       expect(adapter.published).toHaveLength(0)
+    })
+
+    it('holds a job back while a rate limit pauses its channel, and tries it when waiting would make it too late', async () => {
+      const [first, second] = await connect(['Bottega', 'Forno'])
+      const held = submission([first!.id])
+      const tried = submission([second!.id])
+      await submitJobs(context, held)
+      await submitJobs(context, tried)
+      advance(60 * 60_000)
+      const [row] = await db.select().from(channels).where(eq(channels.id, first!.id))
+      const [other] = await db.select().from(channels).where(eq(channels.id, second!.id))
+      // The readers paused one channel for 20 minutes and the other for two hours.
+      await pauseForRateLimit(db, row!, new RateLimited('usage', 'channel', new Date(now.getTime() + 20 * 60_000)), now)
+      await pauseForRateLimit(db, other!, new RateLimited('usage', 'channel', new Date(now.getTime() + 2 * 3_600_000)), now)
+
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published.map(input => input.channel.id)).toEqual([second!.id])
+      expect(await claimNext(context)).toBeNull()
+      const [job] = (await listJobs(context, org, held.postId)).jobs
+      expect(job).toMatchObject({ state: 'queued', attemptCount: 0 })
+      const [stored] = await db.select().from(jobs).where(eq(jobs.id, job!.id))
+      expect(stored!.notBefore).toEqual(new Date(now.getTime() + 20 * 60_000))
+      const deferred = await db.select().from(events).where(eq(events.jobId, job!.id))
+      expect(deferred.map(event => event.kind)).toContain('job.deferred')
+
+      advance(20 * 60_000)
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published.map(input => input.channel.id)).toEqual([second!.id, first!.id])
+    })
+
+    it('retries a rate-limited publish when the limit lifts, never past the lateness limit', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      const publishAt = new Date(now)
+      adapter.outcomes = [
+        { kind: 'failed', retryable: true, code: 'rate_limited', detail: '80001', retryAt: new Date(now.getTime() + 25 * 60_000) },
+        { kind: 'failed', retryable: true, code: 'rate_limited', detail: '80001', retryAt: new Date(now.getTime() + 5 * 3_600_000) },
+      ]
+      await runDue()
+      const [first] = await db.select().from(jobs)
+      expect(first).toMatchObject({ state: 'queued', lastError: 'rate_limited' })
+      expect(first!.notBefore).toEqual(new Date(now.getTime() + 25 * 60_000))
+      advance(25 * 60_000)
+      await runDue()
+      const [second] = await db.select().from(jobs)
+      // The limit outlasts the hour: one last try a minute inside it.
+      expect(second!.notBefore).toEqual(new Date(publishAt.getTime() + lastStartMs))
+      advance(publishAt.getTime() + lastStartMs - now.getTime())
+      expect(await runDue()).toMatchObject({ kind: 'published' })
     })
 
     it('marks the channel for reauthorization on auth failures', async () => {
@@ -1146,6 +1198,20 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       await collectDueResponses(context)
       const [after] = await db.select().from(responseChecks)
       expect(after!.nextCheckAt.getTime() - now.getTime()).toBe(2 * minute)
+    })
+
+    it('keeps a read whose usage is high and pauses the app before Meta refuses', async () => {
+      const { channels: connected } = await published(['Bottega', 'Forno'])
+      adapter.metricsWith = async input => {
+        input.slowDown?.(new RateLimited('Meta usage is high (app 93%)', 'app', new Date(now.getTime() + 15 * minute)))
+        return { values: { likes: 9 }, unavailable: [] }
+      }
+      expect((await collectDueMetrics(context)).failed).toBe(0)
+      expect((await db.select().from(postMetrics)).map(row => row.values)).toContainEqual({ likes: 9 })
+      const paused = await db.select().from(channelMetrics)
+      expect(paused.map(row => row.channelId).sort()).toEqual(connected.map(channel => channel.id).sort())
+      for (const row of paused) expect(row.pausedUntil).toEqual(new Date(now.getTime() + 15 * minute))
+      expect(await collectDueMetrics(context)).toEqual({ collected: 0, failed: 0 })
     })
 
     it('pauses every channel on the provider app when the limit is the app\'s', async () => {

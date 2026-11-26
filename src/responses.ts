@@ -7,7 +7,7 @@ import { channelMetrics, channels, jobs, postResponses, replies, responseChecks,
 import { EngineError } from './errors.js'
 import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
-import { notPaused, pauseForRateLimit } from './pause.js'
+import { notPaused, pauseForRateLimit, SlowDown } from './pause.js'
 import { RateLimited, ReauthRequired, type PlatformResponse } from './platforms/types.js'
 import { responsesRetentionMs } from './retention.js'
 import { emitWebhookEvents } from './webhooks.js'
@@ -154,9 +154,10 @@ export async function collectDueResponses(context: EngineContext, budget?: CallB
     }
     try {
       const { app, token } = await channelDriver(context, context.db, channel)
+      const slowDown = new SlowDown()
       const result = await context.adapters.get(channel.platform)!.responses!(app, {
         channel: channelTarget(channel), token, externalId: job.receipt!.externalId,
-        morePages: () => budget?.take(channel.platform) ?? true,
+        morePages: () => budget?.take(channel.platform) ?? true, slowDown: slowDown.note,
       })
       const finished = clock(context)
       if (result.kind === 'unavailable') {
@@ -172,6 +173,7 @@ export async function collectDueResponses(context: EngineContext, budget?: CallB
         await save({ state: 'ok', reason: null, checkedAt: finished, failureCount: 0, lastError: null, nextCheckAt: next },
           sql`least(${next}, case when ${responseChecks.watchUntil} > ${finished} then ${watchedNext}::timestamptz end)`)
       }
+      await slowDown.apply(context.db, channel, finished)
       checked++
     } catch (error) {
       const finished = clock(context)
