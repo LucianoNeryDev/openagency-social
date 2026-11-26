@@ -98,10 +98,15 @@ Updated 2026-11-26.
     came from.
   - Audience statistics: when followers are online, and their countries and
     ages.
+  - Competitors' public numbers, through the organization's own connected
+    channels and official APIs only: Instagram business and creator
+    accounts (followers and recent posts with their likes, comments and
+    links), YouTube channels (subscribers and each video's numbers), and the
+    ads they run from Meta's Ad Library.
 
 ## Later
 
-- Public numbers of competitors' Instagram business accounts, chosen by the
-  organization, for Portal's reports.
+- Competitors' Facebook Pages, once Meta grants the Page Public Content
+  Access feature.
 - Statistics for TikTok, X, LinkedIn, Threads, Pinterest and Reddit, through
   the official APIs where a platform offers them.
