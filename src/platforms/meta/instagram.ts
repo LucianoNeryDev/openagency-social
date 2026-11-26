@@ -3,7 +3,8 @@ import { invalid } from '../../errors.js'
 import type { MediaInfo, PublishInput, PublishOutcome, ReconcileInput, ReconcileOutcome } from '../types.js'
 import { checkVideo, h264, hevc, type VideoRules } from '../video.js'
 import { classify } from './classify.js'
-import { GraphError, type GraphCall, type GraphClient } from './graph.js'
+import { pickPost } from '../post-match.js'
+import { GraphError, graphTime, type GraphCall, type GraphClient } from './graph.js'
 
 const createdSchema = z.object({ id: z.string().regex(/^[\d_]+$/) })
 const containerStatusSchema = z.object({ status_code: z.string().optional(), status: z.string().optional() })
@@ -91,29 +92,33 @@ export class InstagramPublisher {
     if (input.media.some(file => !file.publicUrl)) return { kind: 'failed', retryable: false, code: 'public_media_unavailable', detail: 'PUBLIC_MEDIA_URL is not configured' }
     const reel = isVideo(input.media[0]!)
     const poll = reel ? this.polls.video ?? defaultVideoPoll : this.polls.image ?? defaultImagePoll
+    const upload = this.graph.timeouts.upload
 
     let containerId: string
     try {
       if (reel) {
         const settings = reelSettingsSchema.parse(input.settings)
         const cover = input.media[1]?.publicUrl
-        containerId = createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, form: {
+        containerId = createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, timeoutMs: upload, form: {
           media_type: 'REELS', video_url: input.media[0]!.publicUrl!, caption: input.content,
           share_to_feed: String(settings.shareToFeed ?? true),
           ...(cover ? { cover_url: cover } : settings.thumbOffsetMs === undefined ? {} : { thumb_offset: String(settings.thumbOffsetMs) }),
         } })).id
       } else if (input.media.length === 1) {
-        containerId = createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, form: { image_url: input.media[0]!.publicUrl!, caption: input.content } })).id
+        containerId = createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, timeoutMs: upload,
+          form: { image_url: input.media[0]!.publicUrl!, caption: input.content } })).id
       } else {
         const children: string[] = []
         for (const file of input.media) {
-          children.push(createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, form: { image_url: file.publicUrl!, is_carousel_item: 'true' } })).id)
+          children.push(createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, timeoutMs: upload,
+            form: { image_url: file.publicUrl!, is_carousel_item: 'true' } })).id)
+          await input.heartbeat?.()
         }
         for (const child of children) {
           const ready = await this.waitForContainer(call, child, poll, input.heartbeat)
           if (ready) return ready
         }
-        containerId = createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, form: {
+        containerId = createdSchema.parse(await this.graph.request('POST', `/${user}/media`, { ...call, timeoutMs: upload, form: {
           media_type: 'CAROUSEL', children: children.join(','), caption: input.content,
         } })).id
       }
@@ -127,7 +132,8 @@ export class InstagramPublisher {
     let published: z.infer<typeof createdSchema>
     await input.beforeVisible?.()
     try {
-      published = createdSchema.parse(await this.graph.request('POST', `/${user}/media_publish`, { ...call, form: { creation_id: containerId } }))
+      published = createdSchema.parse(await this.graph.request('POST', `/${user}/media_publish`, { ...call, timeoutMs: this.graph.timeouts.publish,
+        form: { creation_id: containerId } }))
     } catch (error) {
       return classify(error, true)
     }
@@ -159,10 +165,7 @@ export class InstagramPublisher {
     const result = mediaListSchema.parse(await this.graph.request('GET', `/${input.channel.externalId}/media`, {
       ...call, query: { fields: 'id,caption,timestamp,permalink', limit: '50' },
     }))
-    const matches = result.data.filter(post => post.caption === input.content && !input.excludeExternalIds.includes(post.id)
-      && (post.timestamp === undefined || Date.parse(post.timestamp) >= input.since.getTime()))
-    if (matches.length === 1) return { kind: 'published', externalId: matches[0]!.id, url: matches[0]!.permalink }
-    if (matches.length === 0) return { kind: 'not_found' }
-    return { kind: 'ambiguous', detail: `${matches.length} posts match the caption` }
+    return pickPost(result.data.map(post => ({ id: post.id, text: post.caption ?? null, createdAt: graphTime(post.timestamp),
+      ...(post.permalink ? { url: post.permalink } : {}) })), input)
   }
 }

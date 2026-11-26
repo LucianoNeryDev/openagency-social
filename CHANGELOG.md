@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Reconcile finds a post whose caption Meta changed: captions are compared
+  normalised (NFKC, without emoji variation selectors and zero-width
+  characters, whitespace collapsed), and when none matches whole, the first
+  60 characters of a caption of at least 20 match a post made within 30
+  minutes of the attempt. On Facebook, posts the Page hid (or made with
+  `unpublished`) are looked for in the feed with `include_hidden` when the
+  published posts have no match.
+- Facebook photos are not uploaded again on each retry: an attempt keeps
+  the unpublished photo IDs it uploaded (migration `0024`, a nullable
+  `attempts.uploads`), and a retry within six hours attaches them again
+  after checking each still exists.
+- Longer Graph timeouts for what Meta answers slowly: 3 minutes for photo
+  uploads and Instagram containers, 2 minutes for the feed post and
+  `media_publish` (20 seconds otherwise). docs/deploy.md gives a matching
+  shutdown grace.
 - Posts a pause cancelled can be brought back: `POST /v1/jobs/restore`
   `{organizationId, postId, revision}` queues again the revision's jobs
   that were cancelled when they came due during a pause (`lastError`

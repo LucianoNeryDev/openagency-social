@@ -120,7 +120,7 @@ ordinary video.
 | `POST /v1/jobs/cancel` | `{organizationId, postId, revision}` → per job `cancelled`, or `too_late` with its current state. |
 | `POST /v1/jobs/restore` | `{organizationId, postId, revision}` brings back the jobs a pause cancelled (`cancelled` with `lastError` `paused`), for Portal's "Ripristina" once the pause is lifted → per job `{jobId, channelId, state, result}`. `result` is `restored` (queued again, `lastError` null, to start now or at `publishAt` if still ahead), `paused` (publishing is still paused for its channel), `too_late` (more than 59 minutes past `publishAt`: submit a new revision), `channel_inactive`, `daily_limit` (the channel's day filled up meanwhile) or `not_cancelled_by_pause` (any other state, or cancelled by a person). Unknown post: `404`. |
 | `GET /v1/jobs?organizationId=&postId=` | Jobs with state, attempt count, receipt and last error. |
-| `POST /v1/jobs/:id/reconcile` | `{organizationId}`. Reads the platform for an `uncertain` job: `published`, `failed`, `ambiguous` or `too_early`. |
+| `POST /v1/jobs/:id/reconcile` | `{organizationId}`. Reads the platform for an `uncertain` job: `published`, `failed`, `ambiguous` or `too_early`. A post matches when its caption equals the job's once both are normalised (Unicode NFKC, emoji variation selectors and zero-width characters removed, whitespace collapsed), or, when none does, when the first 60 characters of a caption of 20 or more agree and the post appeared within 30 minutes of the attempt (Meta may trim a caption or change its hashtags and emojis). Posts other jobs hold are skipped. On Facebook, posts the Page hid or made with `unpublished` are found in the feed (`include_hidden`) when the published posts have no match. |
 | `POST /v1/jobs/:id/resolve` | A person settles an `uncertain` job: `{organizationId, outcome: "published", externalId, url?, resolvedByUserId}` (the post's platform ID, so metrics and replies keep working; refused with `receipt_taken` when another post of the channel has it) or `{organizationId, outcome: "not_published", resolvedByUserId}` (`failed`, `resolved_not_published`; submit a new revision to post it). Any other state: `409 not_uncertain`. |
 
 Job states: `queued`, `running`, `published`, `failed`, `uncertain`,
@@ -136,6 +136,14 @@ dies, the job is queued again at once, and that attempt does not count
 against its tries. Only an attempt that sent and got no answer makes the job
 `uncertain`. A job more than an hour past `publishAt` is not started any
 more and fails as `too_late`.
+
+A Facebook post's photos are uploaded unpublished before the feed post;
+each upload is kept on its attempt (`uploads`), and a retry of the job
+attaches the same photos again, after checking each still exists, instead of
+uploading them anew (for six hours; Meta keeps unpublished photos about a
+day). Uploads, Instagram's containers, the feed post and `media_publish`
+get 3 minutes (uploads and containers) and 2 minutes (the publishing
+request) before the attempt gives up, instead of a read's 20 seconds.
 
 Rate limits: a retryable failure is tried again after 1, 2, 4 and 8
 minutes, or, for a rate limit whose end Meta gives

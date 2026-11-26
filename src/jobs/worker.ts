@@ -1,7 +1,7 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, lte, ne, sql } from 'drizzle-orm'
 import { lockControls, readPublishing } from '../channels.js'
 import { adapterFor, clock, recordEvent, type EngineContext } from '../context.js'
-import { attempts, channels, jobLanes, jobs, oauthStates, type JobLane, type JobState } from '../db/schema.js'
+import { attempts, channels, jobLanes, jobs, oauthStates, type AttemptUpload, type JobLane, type JobState } from '../db/schema.js'
 import { channelDriver } from './driver.js'
 import { refreshIdleCredentials, TransientCredentialError } from '../credentials.js'
 import { EngineError } from '../errors.js'
@@ -137,13 +137,36 @@ async function publishClaimed(context: EngineContext, claimed: ClaimedJob): Prom
     if (error instanceof EngineError && error.code === 'platform_unavailable') return { kind: 'failed', retryable: false, code: 'platform_unavailable', detail: error.message }
     return { kind: 'failed', retryable: false, code: 'preparation_failed', detail: error instanceof Error ? error.message : 'Preparation failed' }
   }
+  // Only an optimisation: without them the files are uploaded again.
+  const uploads = await earlierUploads(context, job.id, claimed.attemptId).catch(() => [])
   return adapter.publish(prepared.app, {
     attemptId: claimed.attemptId, channel: { id: channel.id, kind: channel.kind, externalId: channel.externalId }, token: prepared.token,
     ...(prepared.browserAccount ? { browserAccount: prepared.browserAccount } : {}),
     content: job.payload.content, media: prepared.files, settings: job.payload.settings,
+    ...(uploads.length ? { uploads } : {}),
+    recordUpload: upload => recordUpload(context, claimed.attemptId, upload),
     heartbeat: async () => { await context.db.update(attempts).set({ heartbeatAt: clock(context) }).where(eq(attempts.id, claimed.attemptId)) },
     beforeVisible: () => markSent(context, claimed.attemptId),
   })
+}
+
+/** What the job's earlier attempts uploaded: the newest upload of each file. */
+async function earlierUploads(context: EngineContext, jobId: string, attemptId: string) {
+  const rows = await context.db.select({ uploads: attempts.uploads }).from(attempts)
+    .where(and(eq(attempts.jobId, jobId), ne(attempts.id, attemptId), isNotNull(attempts.uploads))).orderBy(desc(attempts.startedAt))
+  const newest = new Map<string, AttemptUpload>()
+  for (const row of rows) for (const upload of [...row.uploads ?? []].reverse()) if (!newest.has(upload.mediaId)) newest.set(upload.mediaId, upload)
+  return [...newest.values()]
+}
+
+/** Keeps an upload on the attempt for later ones. Best effort: a failure only means a retry uploads the file again. */
+async function recordUpload(context: EngineContext, attemptId: string, upload: AttemptUpload) {
+  try {
+    await context.db.update(attempts).set({ uploads: sql`coalesce(${attempts.uploads}, '[]'::jsonb) || ${JSON.stringify([upload])}::jsonb` })
+      .where(eq(attempts.id, attemptId))
+  } catch (error) {
+    log('warn', 'upload not kept for retries', { attemptId, ...errorFields(error) })
+  }
 }
 
 /**

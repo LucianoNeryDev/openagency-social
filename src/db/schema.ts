@@ -152,6 +152,13 @@ export interface JobPayload {
   approvedAt: string
 }
 
+/** A file an attempt uploaded to the platform before its visible request (Facebook's unpublished photos), kept so a retry can use it again. */
+export interface AttemptUpload {
+  mediaId: string
+  externalId: string
+  uploadedAt: string
+}
+
 export interface JobReceipt {
   externalId: string
   url?: string
@@ -429,6 +436,8 @@ export const attempts = pgTable('attempts', {
   // When the request that can make the post visible was sent. An attempt that
   // ends without it published nothing, so its job can be queued again.
   sentAt: timestamp('sent_at', { withTimezone: true }),
+  // Files the attempt uploaded before its visible request; a retry of the job reuses them while they last.
+  uploads: jsonb('uploads').$type<AttemptUpload[]>(),
   errorCode: text('error_code'),
   detail: text('detail'),
 }, table => [

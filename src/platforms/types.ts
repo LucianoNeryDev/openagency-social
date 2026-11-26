@@ -1,5 +1,5 @@
 import type {
-  ChannelKind, ChannelMetricName, ChannelMetricValues, MessageAttachment, MessagingPlatform, MetricName, MetricValues, Platform, ProviderAppSettings,
+  AttemptUpload, ChannelKind, ChannelMetricName, ChannelMetricValues, MessageAttachment, MessagingPlatform, MetricName, MetricValues, Platform, ProviderAppSettings,
 } from '../db/schema.js'
 
 /** A provider app with its secret resolved from the environment. */
@@ -118,6 +118,10 @@ export interface PublishInput {
   content: string
   media: MediaFile[]
   settings: Record<string, unknown>
+  /** What earlier attempts of the job uploaded (the newest per file), for an adapter that can use it again. */
+  uploads?: AttemptUpload[]
+  /** Keeps an upload for later attempts as soon as it is made. Never throws. */
+  recordUpload?: (upload: AttemptUpload) => Promise<void>
 }
 
 /** The attempt was closed before its visible request: nothing was sent, and the job is already queued again. */

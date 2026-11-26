@@ -447,6 +447,35 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect((await listJobs(context, org, input.postId)).jobs[0]!.state).toBe('failed')
     })
 
+    it('hands a retry the uploads earlier attempts kept, the newest per file', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      let round = 0
+      adapter.beforeVisible = async publish => {
+        round++
+        if (round === 1) {
+          await publish.recordUpload!({ mediaId: 'm1', externalId: '501', uploadedAt: now.toISOString() })
+          await publish.recordUpload!({ mediaId: 'm2', externalId: '502', uploadedAt: now.toISOString() })
+        }
+        if (round === 2) await publish.recordUpload!({ mediaId: 'm2', externalId: '602', uploadedAt: now.toISOString() })
+      }
+      adapter.outcomes = [{ kind: 'failed', retryable: true, code: 'unreachable', detail: 'down' }, { kind: 'failed', retryable: true, code: 'unreachable', detail: 'down' }]
+      await runDue()
+      expect(adapter.published[0]!.uploads).toBeUndefined()
+      advance(60_000)
+      await runDue()
+      expect(adapter.published[1]!.uploads).toEqual(expect.arrayContaining([expect.objectContaining({ mediaId: 'm1', externalId: '501' }),
+        expect.objectContaining({ mediaId: 'm2', externalId: '502' })]))
+      expect(adapter.published[1]!.uploads).toHaveLength(2)
+      advance(2 * 60_000)
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published[2]!.uploads).toEqual(expect.arrayContaining([expect.objectContaining({ mediaId: 'm1', externalId: '501' }),
+        expect.objectContaining({ mediaId: 'm2', externalId: '602' })]))
+      expect(adapter.published[2]!.uploads).toHaveLength(2)
+    })
+
     it('fails a job that is more than an hour late without calling the platform', async () => {
       const [channel] = await connect()
       const input = submission([channel!.id])
