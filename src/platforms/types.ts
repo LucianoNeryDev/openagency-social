@@ -466,6 +466,12 @@ export interface PlatformAdapter {
    * refuses it; any other error is transient.
    */
   refreshCredential?(app: ResolvedProviderApp, credential: ChannelCredential): Promise<ChannelCredential>
+  /**
+   * One cheap read that proves the channel's token still works (the daily
+   * token check). Throws `ReauthRequired` when the platform says the token
+   * is invalid or revoked; any other error is transient.
+   */
+  checkCredential?(app: ResolvedProviderApp | null, input: { channel: ChannelTarget, token: string, spendCall?: () => void }): Promise<void>
   /** Refresh when the access token expires within this long. */
   readonly refreshBeforeMs?: number
   /**

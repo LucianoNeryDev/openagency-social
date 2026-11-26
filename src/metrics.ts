@@ -5,8 +5,9 @@ import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
 import type { CallBudget } from './budget.js'
 import { notPaused, pauseForRateLimit } from './pause.js'
-import { RateLimited } from './platforms/types.js'
+import { RateLimited, ReauthRequired } from './platforms/types.js'
 import { emitWebhookEvents, metricChanges, watchedPostMetricsIntervalMs, watchedPostMetricsWindowMs, webhookWatches } from './webhooks.js'
+import { markNeedsReauth } from './token-check.js'
 
 /** Posts older than this are no longer refreshed; their last numbers stay. */
 export const metricsWindowMs = 90 * 86_400_000
@@ -92,6 +93,7 @@ export async function collectDueMetrics(context: EngineContext, limit = metricsB
         failed++
         continue
       }
+      if (error instanceof ReauthRequired) await markNeedsReauth(context, channel, 'read_refused')
       const failures = (failureCount ?? 0) + 1
       const finished = clock(context)
       const values = { nextCollectAt: new Date(finished.getTime() + metricsRetryDelayMs(failures)), failureCount: failures,

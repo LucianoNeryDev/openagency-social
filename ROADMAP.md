@@ -8,6 +8,8 @@ Updated 2026-11-26.
 
 ## Done
 
+- Revoked logins found before a post is due: a daily token check per
+  channel, and background reads that mark a refused token `needs_reauth`.
 - Publishing to Facebook Pages, Instagram (images, carousels and reels,
   through a Page or Instagram's own login) and YouTube through their APIs,
   with pause, cancel, receipts, retries and token renewal.
@@ -51,9 +53,6 @@ Updated 2026-11-26.
   change, so Portal reads them at once instead of on its schedule.
 
 - Publishing that agencies can rely on:
-  - Revoked logins found before a post is due: a daily token check, and the
-    background readers mark a channel `needs_reauth` on an invalid token as
-    publishing does.
   - Their own worker slots for video and browser jobs, so a few reels or a
     browser session cannot hold other posts past the one-hour lateness limit.
   - A failed media download by Instagram retried instead of rejected;

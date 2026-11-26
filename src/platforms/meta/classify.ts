@@ -1,4 +1,4 @@
-import { RateLimited, type PublishOutcome } from '../types.js'
+import { RateLimited, ReauthRequired, type PublishOutcome } from '../types.js'
 import { GraphError } from './graph.js'
 
 /** Meta error codes that mean the token or its permissions no longer work. */
@@ -39,11 +39,17 @@ export function rateLimited(error: unknown) {
   return code === 4 || code === 17 || code === 32 || code === 613 || (code >= 80001 && code <= 80014) || error.failure.status === 429
 }
 
-/** Runs a read, turning a Meta rate limit into `RateLimited`. */
+/** The token is invalid, expired or revoked (OAuthException 190, or 102 for a session): a new login is needed. Missing permissions are not this. */
+export function tokenInvalid(error: unknown) {
+  return error instanceof GraphError && error.failure.kind === 'http' && (error.failure.code === 190 || error.failure.code === 102)
+}
+
+/** Runs a read, turning a Meta rate limit into `RateLimited` and an invalid token into `ReauthRequired`. */
 export async function guardRateLimit<T>(read: () => Promise<T>): Promise<T> {
   try {
     return await read()
   } catch (error) {
+    if (tokenInvalid(error)) throw new ReauthRequired(error instanceof Error ? error.message : 'Invalid token')
     if (rateLimited(error)) {
       const appWide = error instanceof GraphError && error.failure.kind === 'http' && error.failure.code === 4
       throw new RateLimited(error instanceof Error ? error.message : 'Rate limited', appWide ? 'app' : 'channel')

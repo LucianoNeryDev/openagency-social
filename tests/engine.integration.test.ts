@@ -23,6 +23,7 @@ import { CallBudget } from '../src/budget.js'
 import { collectDueChannelMetrics, readChannelMetrics } from '../src/channel-metrics.js'
 import { createEngineApp } from '../src/http/app.js'
 import { collectDueResponses, readResponses, watchResponses } from '../src/responses.js'
+import { checkDueTokens } from '../src/token-check.js'
 import { applyRetention } from '../src/retention.js'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -86,6 +87,12 @@ class FakeAdapter implements PlatformAdapter {
   async accountActivity(_app: unknown, input: AccountActivityInput) {
     this.activityCalls.push(input)
     return this.activityWith(input)
+  }
+  checks: string[] = []
+  checkWith: () => Promise<void> = async () => undefined
+  async checkCredential(_app: unknown, input: { channel: { id: string }, token: string }) {
+    this.checks.push(input.channel.id)
+    return this.checkWith()
   }
   keepAlive = false
   refreshes: ChannelCredential[] = []
@@ -553,6 +560,46 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       await runDue()
       const [job] = (await listJobs(context, org, input.postId)).jobs
       await expect(resolveJob(context, job!.id, { organizationId: org, outcome: 'published', externalId: 'same', resolvedByUserId: 'u1' })).rejects.toMatchObject({ code: 'receipt_taken' })
+    })
+  })
+
+  describe('token check', () => {
+    it('proves each token once a day and marks a refused one needs_reauth before a post is due', async () => {
+      const [first, second] = await connect(['Bottega', 'Forno'])
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 2, valid: 2, refused: 0 })
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 0 })
+      advance(25 * 60 * 60_000)
+      adapter.checkWith = async () => { throw new ReauthRequired('Error validating access token: The user has not authorized application.') }
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 2, refused: 2 })
+      const listed = await listChannels(context, org)
+      expect(listed.map(channel => channel.status)).toEqual(['needs_reauth', 'needs_reauth'])
+      const kinds = (await db.select().from(events).where(eq(events.channelId, first!.id))).map(row => row.kind)
+      expect(kinds).toContain('channel.needs_reauth')
+      // Inactive channels are not checked again.
+      advance(25 * 60 * 60_000)
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 0 })
+      expect(second).toBeDefined()
+    })
+
+    it('a transient error leaves the channel active and due again', async () => {
+      await connect()
+      adapter.checkWith = async () => { throw new Error('socket hang up') }
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 0, failed: 1 })
+      adapter.checkWith = async () => undefined
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 1, valid: 1 })
+      expect((await listChannels(context, org))[0]).toMatchObject({ status: 'active' })
+    })
+
+    it('a background read refused for the token marks the channel needs_reauth', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      await runDue()
+      adapter.metricsWith = async () => { throw new ReauthRequired('Error validating access token') }
+      advance(2 * 60 * 60_000)
+      await collectDueMetrics(context)
+      expect((await listChannels(context, org))[0]).toMatchObject({ status: 'needs_reauth' })
     })
   })
 

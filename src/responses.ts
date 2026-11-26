@@ -11,6 +11,7 @@ import { notPaused, pauseForRateLimit } from './pause.js'
 import { RateLimited, ReauthRequired, type PlatformResponse } from './platforms/types.js'
 import { responsesRetentionMs } from './retention.js'
 import { emitWebhookEvents } from './webhooks.js'
+import { markNeedsReauth } from './token-check.js'
 
 const minuteMs = 60_000
 const hourMs = 60 * minuteMs
@@ -181,6 +182,7 @@ export async function collectDueResponses(context: EngineContext, budget?: CallB
         log('warn', 'channel rate limited', { channelId: channel.id, scope: error.scope, until: until.toISOString() })
         continue
       }
+      if (error instanceof ReauthRequired) await markNeedsReauth(context, channel, 'read_refused')
       const failures = (check?.failureCount ?? 0) + 1
       const message = (error instanceof Error ? error.message : 'Reading responses failed').slice(0, 500)
       const reason = error instanceof ReauthRequired || (error instanceof EngineError && error.code === 'channel_inactive')

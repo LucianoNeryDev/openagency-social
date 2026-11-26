@@ -3,7 +3,7 @@ import type { ChannelKind, ChannelMetricName, ChannelMetricValues, MetricName, M
 import { invalid } from '../../errors.js'
 import { mediaFileBytes } from '../../media.js'
 import {
-  AttemptClosedError, RateLimited, ReauthRequired, type AccountActivityInput, type AccountActivityResult, type AccountMetricsInput, type AccountMetricsResult, type ChannelProfile,
+  AttemptClosedError, RateLimited, ReauthRequired, type AccountActivityInput, type AccountActivityResult, type AccountMetricsInput, type AccountMetricsResult, type ChannelProfile, type ChannelTarget,
   type PlatformPost, type ChannelCredential, type ChannelLimits, type ConnectedAccount,
   type FindReplyInput, type FindReplyOutcome, type MediaFile, type MediaInfo, type MetricsInput, type MetricsResult, type PlatformAdapter, type PlatformResponse,
   type PublishInput, type PublishOutcome, type ReconcileInput, type ReconcileOutcome, type ReplyInput, type ReplyOutcome, type ResolvedProviderApp,
@@ -245,6 +245,10 @@ export class YoutubeAdapter implements PlatformAdapter {
     })).catch(() => undefined)
   }
 
+  async checkCredential(_app: ResolvedProviderApp | null, input: { channel: ChannelTarget, token: string }) {
+    await guardQuota(() => this.google.request('GET', `${api}/channels`, { token: input.token, query: { part: 'id', id: input.channel.externalId } }))
+  }
+
   async reconcile(_app: ResolvedProviderApp | null, input: ReconcileInput): Promise<ReconcileOutcome> {
     const settings = youtubeSettingsSchema.parse(input.settings)
     const { items } = channelListSchema.parse((await this.google.request('GET', `${api}/channels`, { token: input.token,
@@ -425,11 +429,12 @@ function classifyReply(error: unknown): ReplyOutcome {
   return { kind: 'failed', retryable: false, code: 'rejected', detail }
 }
 
-/** Quota and rate errors pause reads on the channel instead of counting as failures. */
+/** Quota and rate errors pause reads on the channel instead of counting as failures; a refused token (401) needs a new login. */
 async function guardQuota<T>(read: () => Promise<T>): Promise<T> {
   try {
     return await read()
   } catch (error) {
+    if (error instanceof GoogleError && error.failure.kind === 'http' && error.failure.status === 401) throw new ReauthRequired(error.message)
     if (error instanceof GoogleError && error.failure.kind === 'http' && (error.failure.status === 429 || (error.failure.reason && rateReasons.has(error.failure.reason)))) {
       // The daily quota belongs to the Google project and resets at midnight Pacific time.
       if (error.failure.reason === 'quotaExceeded' || error.failure.reason === 'dailyLimitExceeded') {

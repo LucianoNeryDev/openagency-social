@@ -68,6 +68,8 @@ export const channels = pgTable('channels', {
   grantedScopes: text('granted_scopes').array(),
   // Permissions a platform refused on a send; cleared when the channel connects again.
   refusedScopes: text('refused_scopes').array().notNull().default(sql`'{}'::text[]`),
+  // When the daily token check last proved the grant works, or found it refused (src/token-check.ts).
+  tokenCheckedAt: timestamp('token_checked_at', { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, table => [

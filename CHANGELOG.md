@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Revoked logins found before a post is due: a daily token check reads each
+  connected OAuth channel once (`checkCredential`: the Page or account ID on
+  Meta, `/me` on Instagram's login, the number on WhatsApp, `channels.list`
+  on YouTube) from the shared read budget, and a refused token marks the
+  channel `needs_reauth` (`token_check_refused`), which sends
+  `channel.status.changed`. Channels keep `tokenCheckedAt` (migration `0021`,
+  a nullable column). The background readers (post and account metrics,
+  comments, account activity, conversations) mark the channel the same way
+  (`read_refused`) when Meta answers OAuthException 190 or 102, or Google 401;
+  a missing permission does not.
 - Deploy-safe publishing: attempts record `sentAt`, when the request that can
   make the post visible went out (migration `0020`, a nullable column).
   Adapters call `beforeVisible` right before it; a closed attempt sends

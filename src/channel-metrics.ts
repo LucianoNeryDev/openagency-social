@@ -6,9 +6,10 @@ import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
 import { metricsRetryDelayMs } from './metrics.js'
 import { notPaused, pauseForRateLimit } from './pause.js'
-import { RateLimited } from './platforms/types.js'
+import { RateLimited, ReauthRequired } from './platforms/types.js'
 import { accountEventTypes, emitWebhookEvents, metricChanges, watchedChannelMetricsIntervalMs, watchedEventTypes } from './webhooks.js'
 import { collectChannelActivity } from './channel-activity.js'
+import { markNeedsReauth } from './token-check.js'
 
 /** Account numbers are read every six hours. */
 export const channelMetricsIntervalMs = 6 * 60 * 60_000
@@ -78,6 +79,7 @@ export async function collectDueChannelMetrics(context: EngineContext, budget?: 
         failed++
         continue
       }
+      if (error instanceof ReauthRequired) await markNeedsReauth(context, channel, 'read_refused')
       const failures = (failureCount ?? 0) + 1
       const values = { nextCollectAt: new Date(finished.getTime() + metricsRetryDelayMs(failures)), failureCount: failures,
         lastError: (error instanceof Error ? error.message : 'Account metrics collection failed').slice(0, 500), updatedAt: finished }
