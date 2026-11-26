@@ -5,7 +5,7 @@ import { channelMetrics, channelMetricSamples, channels, type Platform } from '.
 import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
 import { metricsRetryDelayMs } from './metrics.js'
-import { notPaused, pauseForRateLimit } from './pause.js'
+import { notPaused, pauseForRateLimit, SlowDown } from './pause.js'
 import { RateLimited, ReauthRequired } from './platforms/types.js'
 import { accountEventTypes, emitWebhookEvents, metricChanges, watchedChannelMetricsIntervalMs, watchedEventTypes } from './webhooks.js'
 import { collectChannelActivity } from './channel-activity.js'
@@ -52,9 +52,10 @@ export async function collectDueChannelMetrics(context: EngineContext, budget?: 
     const watched = accountEventTypes.some(type => watching.has(type))
     try {
       const { app, token } = await channelDriver(context, context.db, channel)
+      const slowDown = new SlowDown()
       const result = await context.adapters.get(channel.platform)!.accountMetrics!(app, {
         channel: { id: channel.id, kind: channel.kind, externalId: channel.externalId }, token, now: clock(context),
-        spendCall: () => budget?.spend(channel.platform),
+        spendCall: () => budget?.spend(channel.platform), slowDown: slowDown.note,
       })
       const finished = clock(context)
       await context.db.transaction(async transaction => {
@@ -70,6 +71,7 @@ export async function collectDueChannelMetrics(context: EngineContext, budget?: 
               unavailable: values.unavailable, collectedAt: finished.toISOString() }] })
         }
       })
+      await slowDown.apply(context.db, channel, finished)
       collected++
     } catch (error) {
       const finished = clock(context)

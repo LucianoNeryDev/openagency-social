@@ -123,9 +123,13 @@ export const media = pgTable('media', {
   mimeType: text('mime_type').notNull(),
   sizeBytes: integer('size_bytes').notNull(),
   sha256: text('sha256').notNull(),
-  // Pixel size read from the file header; null for images stored before it was recorded.
+  // Pixel size read from the file header (a video's display size, after its rotation); null for files stored before it was recorded.
   width: integer('width'),
   height: integer('height'),
+  // A video's length and codecs from its MP4 boxes (src/mp4.ts); null for files stored before they were read, or that do not say.
+  durationMs: integer('duration_ms'),
+  videoCodec: text('video_codec'),
+  audioCodec: text('audio_codec'),
   // Files stored before media_chunks keep their bytes here; newer ones leave it null.
   data: bytea('data'),
   createdAt: createdAt(),
@@ -146,6 +150,13 @@ export interface JobPayload {
   settings: Record<string, unknown>
   approvedByUserId: string
   approvedAt: string
+}
+
+/** A file an attempt uploaded to the platform before its visible request (Facebook's unpublished photos), kept so a retry can use it again. */
+export interface AttemptUpload {
+  mediaId: string
+  externalId: string
+  uploadedAt: string
 }
 
 export interface JobReceipt {
@@ -425,6 +436,8 @@ export const attempts = pgTable('attempts', {
   // When the request that can make the post visible was sent. An attempt that
   // ends without it published nothing, so its job can be queued again.
   sentAt: timestamp('sent_at', { withTimezone: true }),
+  // Files the attempt uploaded before its visible request; a retry of the job reuses them while they last.
+  uploads: jsonb('uploads').$type<AttemptUpload[]>(),
   errorCode: text('error_code'),
   detail: text('detail'),
 }, table => [

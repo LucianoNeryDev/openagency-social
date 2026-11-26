@@ -1,7 +1,7 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, lte, ne, sql } from 'drizzle-orm'
 import { lockControls, readPublishing } from '../channels.js'
 import { adapterFor, clock, recordEvent, type EngineContext } from '../context.js'
-import { attempts, channels, jobLanes, jobs, oauthStates, type JobLane, type JobState } from '../db/schema.js'
+import { attempts, channels, jobLanes, jobs, oauthStates, type AttemptUpload, type JobLane, type JobState } from '../db/schema.js'
 import { channelDriver } from './driver.js'
 import { refreshIdleCredentials, TransientCredentialError } from '../credentials.js'
 import { EngineError } from '../errors.js'
@@ -18,11 +18,17 @@ import { applyRetention, retentionIntervalMs } from '../retention.js'
 import { checkDueTokens, tokenCheckIntervalMs } from '../token-check.js'
 import { answeringIntervalMs, runAnswering } from '../answering/pipeline.js'
 import { AttemptClosedError, type PublishOutcome } from '../platforms/types.js'
+import { pausedUntil } from '../pause.js'
 import { changeChannelStatus, deliverDueWebhooks, emitJobOutcome, webhooksIntervalMs } from '../webhooks.js'
 
 export const maxAttempts = 5
 /** A job later than this after publishAt is not started any more. */
 export const maxLatenessMs = 60 * 60_000
+/**
+ * The latest a job is scheduled to start, after publishAt: a minute inside
+ * the lateness limit, so a claim a poll later still finds it in time.
+ */
+export const lastStartMs = maxLatenessMs - 60_000
 /** An attempt still open this long after its start or last heartbeat is treated as lost. */
 export const abandonedAfterMs = 10 * 60_000
 /** A queued job this long past its time has not started: readiness reports publishing as late. */
@@ -70,6 +76,16 @@ export async function claimNext(context: EngineContext, lanes: readonly JobLane[
         const [updated] = await transaction.update(jobs).set({ state, lastError: reason, updatedAt: now }).where(eq(jobs.id, job.id)).returning()
         await recordEvent(transaction, { organizationId: job.organizationId, kind: `job.${state}`, jobId: job.id, channelId: job.channelId, detail: { reason } })
         await emitJobOutcome(transaction, updated!, now)
+        return 'skipped' as const
+      }
+      // A rate limit the readers set (on the channel or its whole app) holds the job back until it ends,
+      // unless that would make the job too late: then it is tried now.
+      const limitedUntil = await pausedUntil(transaction, job.channelId, now)
+      if (limitedUntil && limitedUntil.getTime() <= job.publishAt.getTime() + lastStartMs) {
+        log('info', 'job held back by a rate limit', { jobId: job.id, channelId: job.channelId, until: limitedUntil.toISOString() })
+        await transaction.update(jobs).set({ notBefore: limitedUntil, updatedAt: now }).where(eq(jobs.id, job.id))
+        await recordEvent(transaction, { organizationId: job.organizationId, kind: 'job.deferred', jobId: job.id, channelId: job.channelId,
+          detail: { reason: 'rate_limited', until: limitedUntil.toISOString() } })
         return 'skipped' as const
       }
       const [attempt] = await transaction.insert(attempts).values({ jobId: job.id, startedAt: now }).returning({ id: attempts.id })
@@ -121,13 +137,36 @@ async function publishClaimed(context: EngineContext, claimed: ClaimedJob): Prom
     if (error instanceof EngineError && error.code === 'platform_unavailable') return { kind: 'failed', retryable: false, code: 'platform_unavailable', detail: error.message }
     return { kind: 'failed', retryable: false, code: 'preparation_failed', detail: error instanceof Error ? error.message : 'Preparation failed' }
   }
+  // Only an optimisation: without them the files are uploaded again.
+  const uploads = await earlierUploads(context, job.id, claimed.attemptId).catch(() => [])
   return adapter.publish(prepared.app, {
     attemptId: claimed.attemptId, channel: { id: channel.id, kind: channel.kind, externalId: channel.externalId }, token: prepared.token,
     ...(prepared.browserAccount ? { browserAccount: prepared.browserAccount } : {}),
     content: job.payload.content, media: prepared.files, settings: job.payload.settings,
+    ...(uploads.length ? { uploads } : {}),
+    recordUpload: upload => recordUpload(context, claimed.attemptId, upload),
     heartbeat: async () => { await context.db.update(attempts).set({ heartbeatAt: clock(context) }).where(eq(attempts.id, claimed.attemptId)) },
     beforeVisible: () => markSent(context, claimed.attemptId),
   })
+}
+
+/** What the job's earlier attempts uploaded: the newest upload of each file. */
+async function earlierUploads(context: EngineContext, jobId: string, attemptId: string) {
+  const rows = await context.db.select({ uploads: attempts.uploads }).from(attempts)
+    .where(and(eq(attempts.jobId, jobId), ne(attempts.id, attemptId), isNotNull(attempts.uploads))).orderBy(desc(attempts.startedAt))
+  const newest = new Map<string, AttemptUpload>()
+  for (const row of rows) for (const upload of [...row.uploads ?? []].reverse()) if (!newest.has(upload.mediaId)) newest.set(upload.mediaId, upload)
+  return [...newest.values()]
+}
+
+/** Keeps an upload on the attempt for later ones. Best effort: a failure only means a retry uploads the file again. */
+async function recordUpload(context: EngineContext, attemptId: string, upload: AttemptUpload) {
+  try {
+    await context.db.update(attempts).set({ uploads: sql`coalesce(${attempts.uploads}, '[]'::jsonb) || ${JSON.stringify([upload])}::jsonb` })
+      .where(eq(attempts.id, attemptId))
+  } catch (error) {
+    log('warn', 'upload not kept for retries', { attemptId, ...errorFields(error) })
+  }
 }
 
 /**
@@ -169,6 +208,16 @@ export function retryDelayMs(attemptCount: number) {
   return Math.min(60_000 * 2 ** Math.max(0, attemptCount - 1), 15 * 60_000)
 }
 
+/**
+ * When a retryable failure is tried again: when the platform said its rate
+ * limit lifts, or after the backoff; never past the job's last start inside
+ * the lateness limit, where it gets one last try instead of failing too late.
+ */
+export function retryAt(job: { publishAt: Date, attemptCount: number }, outcome: { retryAt?: Date }, now: Date) {
+  const wanted = outcome.retryAt?.getTime() ?? now.getTime() + retryDelayMs(job.attemptCount)
+  return new Date(Math.max(now.getTime(), Math.min(wanted, job.publishAt.getTime() + lastStartMs)))
+}
+
 export async function settleAttempt(context: EngineContext, claimed: ClaimedJob, outcome: PublishOutcome) {
   await context.db.transaction(async transaction => {
     const now = clock(context)
@@ -192,7 +241,7 @@ export async function settleAttempt(context: EngineContext, claimed: ClaimedJob,
     } else if (outcome.kind === 'uncertain') {
       values = { state: 'uncertain', lastError: outcome.code }
     } else if (outcome.retryable && job.attemptCount < maxAttempts) {
-      values = { state: 'queued', notBefore: new Date(now.getTime() + retryDelayMs(job.attemptCount)), lastError: outcome.code }
+      values = { state: 'queued', notBefore: retryAt(job, outcome, now), lastError: outcome.code }
     } else {
       values = { state: 'failed', lastError: outcome.retryable ? `retries_exhausted:${outcome.code}` : outcome.code }
     }

@@ -6,6 +6,7 @@ import type { Executor } from './db/client.js'
 import { media, mediaChunks } from './db/schema.js'
 import { invalid, notFound } from './errors.js'
 import type { MediaFile, MediaInfo } from './platforms/types.js'
+import { Mp4Scanner } from './mp4.js'
 
 export const maxImageBytes = 10 * 1024 * 1024
 export const maxVideoBytes = 1024 * 1024 * 1024
@@ -82,33 +83,40 @@ export async function storeMedia(context: EngineContext, organizationId: string,
     let limit = 0
     let total = 0
     let position = 0
+    let scanner: Mp4Scanner | undefined
     for await (const chunk of inChunks(body, mediaChunkBytes)) {
       total += chunk.length
       if (!id) {
         const mimeType = sniffMedia(chunk)
         if (!mimeType || mimeType !== declaredType) throw invalid('invalid_media', 'Only JPEG and PNG images and MP4 videos are supported')
         limit = mimeType === 'video/mp4' ? maxVideoBytes : maxImageBytes
+        if (mimeType === 'video/mp4') scanner = new Mp4Scanner()
         const size = mimeType === 'video/mp4' ? null : imageSize(chunk, mimeType)
         const [row] = await transaction.insert(media).values({ organizationId, name, mimeType, sizeBytes: 0, sha256: '', width: size?.width, height: size?.height }).returning({ id: media.id })
         id = row!.id
       }
       if (total > limit) throw invalid('invalid_media', 'Images may be up to 10 MB and videos up to 1 GB')
       hash.update(chunk)
+      scanner?.push(chunk)
       await transaction.insert(mediaChunks).values({ mediaId: id, position: position++, data: chunk })
     }
     if (!id) throw invalid('invalid_media', 'Only JPEG and PNG images and MP4 videos are supported')
-    const [row] = await transaction.update(media).set({ sizeBytes: total, sha256: hash.digest('hex') }).where(eq(media.id, id))
-      .returning({ id: media.id, name: media.name, mimeType: media.mimeType, sizeBytes: media.sizeBytes, width: media.width, height: media.height })
+    // A video's details, so submit can refuse what the platform would refuse after processing it.
+    const video = scanner?.details()
+    const [row] = await transaction.update(media).set({ sizeBytes: total, sha256: hash.digest('hex'), ...(video ? { width: video.width, height: video.height,
+      durationMs: video.durationMs, videoCodec: video.videoCodec, audioCodec: video.audioCodec } : {}) }).where(eq(media.id, id))
+      .returning({ id: media.id, name: media.name, mimeType: media.mimeType, sizeBytes: media.sizeBytes, width: media.width, height: media.height,
+        durationMs: media.durationMs, videoCodec: media.videoCodec, audioCodec: media.audioCodec })
     await recordEvent(transaction, { organizationId, kind: 'media.stored', detail: { mediaId: id, sizeBytes: total } })
     return row!
   })
 }
 
 /** Metadata of the tenant's media, in the order given. Throws when one is missing or foreign. */
-/** Metadata of the tenant's media, in the order given. Throws when one is missing or foreign. */
 export async function loadMediaInfo(executor: Executor, organizationId: string, ids: string[]): Promise<MediaInfo[]> {
   if (!ids.length) return []
-  const rows = await executor.select({ id: media.id, mimeType: media.mimeType, sizeBytes: media.sizeBytes, width: media.width, height: media.height })
+  const rows = await executor.select({ id: media.id, mimeType: media.mimeType, sizeBytes: media.sizeBytes, width: media.width, height: media.height,
+    durationMs: media.durationMs, videoCodec: media.videoCodec, audioCodec: media.audioCodec })
     .from(media).where(and(eq(media.organizationId, organizationId), inArray(media.id, ids)))
   return ids.map(id => {
     const row = rows.find(value => value.id === id)

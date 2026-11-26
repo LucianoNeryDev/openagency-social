@@ -86,7 +86,12 @@ process mid-request. Nomad's default `kill_timeout` is 5 s and a client caps
 it at `max_kill_timeout` (30 s by default): with the defaults, set
 `kill_timeout = "30s"` and keep `SHUTDOWN_GRACE_MS` at 25 s. With a client
 whose `max_kill_timeout` allows it, `SHUTDOWN_GRACE_MS=300000` and
-`kill_timeout = "330s"` let a slow upload's last chunk finish. Only one
+`kill_timeout = "330s"` let a slow upload's last chunk finish. Meta's
+photo uploads and Instagram's containers may take up to 3 minutes, and the
+feed post and `media_publish` up to 2: with the default grace an engine
+stopped during one of the last two leaves the job `uncertain`, so
+`SHUTDOWN_GRACE_MS=150000` with `kill_timeout = "180s"` is worth it where the
+client allows. Only one
 engine may run per database, so stop the old one before starting the new
 (one allocation, no canaries).
 

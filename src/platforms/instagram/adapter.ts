@@ -4,7 +4,7 @@ import { invalid } from '../../errors.js'
 import { GraphClient, GraphError, spendAfterFirst, type GraphOptions } from '../meta/graph.js'
 import { instagramActivity } from '../meta/activity.js'
 import { InstagramPublisher, validateInstagram, type ContainerPoll } from '../meta/instagram.js'
-import { guardRateLimit } from '../meta/classify.js'
+import { guardRateLimit, watchUsage } from '../meta/classify.js'
 import { instagramAccountMetrics, instagramMediaMetrics } from '../meta/metrics.js'
 import { findDirectMessage, readConversationMessages, readConversations, sendDirectMessage } from '../meta/messages.js'
 import { instagramFindReply, instagramReply } from '../meta/replies.js'
@@ -120,20 +120,20 @@ export class InstagramLoginAdapter implements PlatformAdapter {
   }
 
   async metrics(_app: ResolvedProviderApp | null, input: MetricsInput): Promise<MetricsResult> {
-    return guardRateLimit(() => instagramMediaMetrics(this.graph, { token: input.token, ...spendAfterFirst(input.spendCall) }, input.externalId))
+    return guardRateLimit(() => instagramMediaMetrics(this.graph, { token: input.token, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }, input.externalId))
   }
 
   async accountMetrics(_app: ResolvedProviderApp | null, input: AccountMetricsInput): Promise<AccountMetricsResult> {
-    return guardRateLimit(() => instagramAccountMetrics(this.graph, { token: input.token, ...spendAfterFirst(input.spendCall) }, input.channel.externalId,
+    return guardRateLimit(() => instagramAccountMetrics(this.graph, { token: input.token, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }, input.channel.externalId,
       input.now ?? new Date()))
   }
 
   async accountActivity(_app: ResolvedProviderApp | null, input: AccountActivityInput): Promise<AccountActivityResult> {
-    return guardRateLimit(() => instagramActivity(this.graph, { token: input.token, ...spendAfterFirst(input.spendCall) }, input.channel.externalId, { login: true }))
+    return guardRateLimit(() => instagramActivity(this.graph, { token: input.token, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }, input.channel.externalId, { login: true }))
   }
 
   async responses(_app: ResolvedProviderApp | null, input: ResponsesInput): Promise<ResponsesResult> {
-    return guardRateLimit(() => instagramResponses(this.graph, { token: input.token }, input, 'instagram_business_manage_comments'))
+    return guardRateLimit(() => instagramResponses(this.graph, { token: input.token, ...watchUsage(input.slowDown) }, input, 'instagram_business_manage_comments'))
   }
 
   replyRules(kind: ChannelKind) {

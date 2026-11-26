@@ -162,6 +162,20 @@
       "when": 1795720660390,
       "tag": "0022_worker_lanes",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1795725681154,
+      "tag": "0023_video_details",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795726260824,
+      "tag": "0024_attempt_uploads",
+      "breakpoints": true
     }
   ]
 }

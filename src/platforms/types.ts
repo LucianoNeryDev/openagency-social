@@ -1,5 +1,5 @@
 import type {
-  ChannelKind, ChannelMetricName, ChannelMetricValues, MessageAttachment, MessagingPlatform, MetricName, MetricValues, Platform, ProviderAppSettings,
+  AttemptUpload, ChannelKind, ChannelMetricName, ChannelMetricValues, MessageAttachment, MessagingPlatform, MetricName, MetricValues, Platform, ProviderAppSettings,
 } from '../db/schema.js'
 
 /** A provider app with its secret resolved from the environment. */
@@ -80,6 +80,15 @@ export interface MediaInfo {
   sizeBytes: number
   width: number | null
   height: number | null
+  /**
+   * A video's length and codecs, read at upload. Null (or absent) for files
+   * stored before they were read, or that do not say: those are let through.
+   */
+  durationMs?: number | null
+  /** The video track's codec: `avc1` (H.264), `hvc1` or `hev1` (HEVC), `av01`, `vp09`, …; null without one. */
+  videoCodec?: string | null
+  /** The sound track's codec: `mp4a` (AAC), `Opus`, …; null without one. */
+  audioCodec?: string | null
 }
 
 export interface BrowserAccountTarget {
@@ -109,6 +118,10 @@ export interface PublishInput {
   content: string
   media: MediaFile[]
   settings: Record<string, unknown>
+  /** What earlier attempts of the job uploaded (the newest per file), for an adapter that can use it again. */
+  uploads?: AttemptUpload[]
+  /** Keeps an upload for later attempts as soon as it is made. Never throws. */
+  recordUpload?: (upload: AttemptUpload) => Promise<void>
 }
 
 /** The attempt was closed before its visible request: nothing was sent, and the job is already queued again. */
@@ -121,8 +134,11 @@ export class AttemptClosedError extends Error {
 
 export type PublishOutcome =
   | { kind: 'published', externalId: string, url?: string }
-  /** The platform did not create the post. `retryable` means trying again is safe. */
-  | { kind: 'failed', retryable: boolean, code: string, detail: string, reauth?: boolean }
+  /**
+   * The platform did not create the post. `retryable` means trying again is
+   * safe; `retryAt`, when the platform says when a rate limit lifts.
+   */
+  | { kind: 'failed', retryable: boolean, code: string, detail: string, reauth?: boolean, retryAt?: Date }
   /** The request may have reached the platform and no result was confirmed. */
   | { kind: 'uncertain', code: string, detail: string }
 
@@ -150,6 +166,8 @@ export interface MetricsInput {
   externalId: string
   /** See `AccountMetricsInput.spendCall`. */
   spendCall?: () => void
+  /** See `AccountMetricsInput.slowDown`. */
+  slowDown?: (limit: RateLimited) => void
 }
 
 export interface MetricsResult {
@@ -169,6 +187,12 @@ export interface AccountMetricsInput {
    * budget. A metrics read does not stop half-way: this only counts.
    */
   spendCall?: () => void
+  /**
+   * Called when the platform's usage figures say to slow down although the
+   * read succeeded (Meta's usage headers at 90% or more): the caller pauses
+   * the channel, or the app, as for a `RateLimited` error, and keeps the result.
+   */
+  slowDown?: (limit: RateLimited) => void
 }
 
 export interface AccountMetricsResult {
@@ -182,6 +206,8 @@ export interface AccountActivityInput {
   token: string
   /** As for account metrics: called before each platform request after the first. */
   spendCall?: () => void
+  /** See `AccountMetricsInput.slowDown`. */
+  slowDown?: (limit: RateLimited) => void
 }
 
 /** The public face of an account. Absent fields are ones the platform does not give. */
@@ -224,6 +250,8 @@ export interface ResponsesInput {
    * request is already paid for by the caller.
    */
   morePages?: () => boolean
+  /** See `AccountMetricsInput.slowDown`. */
+  slowDown?: (limit: RateLimited) => void
 }
 
 /** A comment or reply. Only what the dashboard shows; no avatars, profile links or user IDs. */
