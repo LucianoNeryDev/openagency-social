@@ -13,7 +13,7 @@ JSON (at most 1 MB) except media uploads. Errors have the shape
 | `POST /v1/connect/finish` | `{organizationId, state, code}` → `{channels}`. Called by the dashboard's OAuth callback. |
 | `GET /v1/tenants/:org/channels` | `{channels: [{id, platform, kind, name, externalId, status, maxLength, maxMedia, replies, messages}]}`. Tokens are never returned. `replies` and `messages` are `{available, maxLength?, reason?, permission?}`; see "Replies" and "Direct messages". |
 | `POST /v1/tenants/:org/channels/:id/disable` | Removes the credential, and the channel's responses, replies and conversations. `409 channel_busy` while a job, a reply or a message on the channel is unsettled. |
-| `GET`/`PUT /v1/tenants/:org/publishing` | `{paused, pausedChannelIds, maxPostsPerChannelPerDay?}`. A paused tenant or channel accepts no new jobs, and due jobs are cancelled instead of run. The daily limit (default 10, at most 100) counts non-cancelled, non-failed jobs per channel per calendar day in Europe/Rome. |
+| `GET`/`PUT /v1/tenants/:org/publishing` | `{paused, pausedChannelIds, maxPostsPerChannelPerDay?}`. A paused tenant or channel accepts no new jobs, and due jobs are cancelled instead of run (`lastError` `paused`; `POST /v1/jobs/restore` brings them back once the pause is lifted). The daily limit (default 10, at most 100) counts non-cancelled, non-failed jobs per channel per calendar day in Europe/Rome. |
 
 ## Media
 
@@ -118,6 +118,7 @@ ordinary video.
 | Route | Purpose |
 | --- | --- |
 | `POST /v1/jobs/cancel` | `{organizationId, postId, revision}` → per job `cancelled`, or `too_late` with its current state. |
+| `POST /v1/jobs/restore` | `{organizationId, postId, revision}` brings back the jobs a pause cancelled (`cancelled` with `lastError` `paused`), for Portal's "Ripristina" once the pause is lifted → per job `{jobId, channelId, state, result}`. `result` is `restored` (queued again, `lastError` null, to start now or at `publishAt` if still ahead), `paused` (publishing is still paused for its channel), `too_late` (more than 59 minutes past `publishAt`: submit a new revision), `channel_inactive`, `daily_limit` (the channel's day filled up meanwhile) or `not_cancelled_by_pause` (any other state, or cancelled by a person). Unknown post: `404`. |
 | `GET /v1/jobs?organizationId=&postId=` | Jobs with state, attempt count, receipt and last error. |
 | `POST /v1/jobs/:id/reconcile` | `{organizationId}`. Reads the platform for an `uncertain` job: `published`, `failed`, `ambiguous` or `too_early`. |
 | `POST /v1/jobs/:id/resolve` | A person settles an `uncertain` job: `{organizationId, outcome: "published", externalId, url?, resolvedByUserId}` (the post's platform ID, so metrics and replies keep working; refused with `receipt_taken` when another post of the channel has it) or `{organizationId, outcome: "not_published", resolvedByUserId}` (`failed`, `resolved_not_published`; submit a new revision to post it). Any other state: `409 not_uncertain`. |

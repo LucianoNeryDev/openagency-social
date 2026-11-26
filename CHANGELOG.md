@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Posts a pause cancelled can be brought back: `POST /v1/jobs/restore`
+  `{organizationId, postId, revision}` queues again the revision's jobs
+  that were cancelled when they came due during a pause (`lastError`
+  `paused`), once publishing is no longer paused for their channel, and
+  answers per job `restored`, `paused`, `too_late` (more than 59 minutes
+  past `publishAt`), `channel_inactive`, `daily_limit` or
+  `not_cancelled_by_pause`. Each restore records `job.restored` and sends
+  `jobs.changed`.
 - Videos checked on submit: an MP4's `moov` box is read as the upload
   arrives (`mvhd` duration, the video track's display size after rotation
   and its codec, the sound track's codec), stored on `media` (migration

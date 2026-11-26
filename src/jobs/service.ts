@@ -8,6 +8,8 @@ import { channelDriver } from './driver.js'
 import { attempts, channels, jobs, type JobLane, type JobPayload } from '../db/schema.js'
 import { conflict, invalid, notFound } from '../errors.js'
 import { loadMediaInfo } from '../media.js'
+import type { Executor } from '../db/client.js'
+import { lastStartMs } from './worker.js'
 
 export const minimumLeadMs = 5 * 60_000
 /** Reconcile may only conclude "not published" after this long. */
@@ -117,6 +119,56 @@ export async function cancelJobs(context: EngineContext, organizationId: string,
     }
     return { jobs: results }
   })
+}
+
+/** Why a job was not brought back by `restoreJobs`; `restored` when it was. */
+export type RestoreResult = 'restored' | 'too_late' | 'paused' | 'channel_inactive' | 'daily_limit' | 'not_cancelled_by_pause'
+
+/**
+ * Brings back the jobs of a revision that a pause cancelled when they came
+ * due (`lastError` `paused`), once publishing is no longer paused for their
+ * channel: each is queued again to start now (or at publishAt, if still
+ * ahead), if it can still start within the lateness limit and its channel's
+ * daily limit has room. Every job of the revision gets a result; jobs a
+ * person cancelled, or in any other state, are `not_cancelled_by_pause`.
+ */
+export async function restoreJobs(context: EngineContext, organizationId: string, postId: string, revision: number) {
+  return context.db.transaction(async transaction => {
+    await lockControls(transaction, organizationId)
+    const rows = await transaction.select().from(jobs)
+      .where(and(eq(jobs.organizationId, organizationId), eq(jobs.postId, postId), eq(jobs.revision, revision))).orderBy(jobs.channelId).for('update')
+    if (!rows.length) throw notFound('Jobs')
+    const controls = await readPublishing(transaction, organizationId)
+    const now = clock(context)
+    const results: Array<{ jobId: string, channelId: string, state: JobRow['state'], result: RestoreResult }> = []
+    for (const job of rows) {
+      const result = await restorable(transaction, job, controls, now)
+      if (result !== 'restored') {
+        results.push({ jobId: job.id, channelId: job.channelId, state: job.state, result })
+        continue
+      }
+      const notBefore = new Date(Math.max(now.getTime(), job.publishAt.getTime()))
+      const [updated] = await transaction.update(jobs).set({ state: 'queued', notBefore, lastError: null, updatedAt: now }).where(eq(jobs.id, job.id)).returning()
+      await recordEvent(transaction, { organizationId, kind: 'job.restored', jobId: job.id, channelId: job.channelId })
+      await emitJobOutcome(transaction, updated!, now)
+      results.push({ jobId: job.id, channelId: job.channelId, state: 'queued', result })
+    }
+    return { jobs: results }
+  })
+}
+
+async function restorable(transaction: Executor, job: JobRow, controls: Awaited<ReturnType<typeof readPublishing>>, now: Date): Promise<RestoreResult> {
+  if (job.state !== 'cancelled' || job.lastError !== 'paused') return 'not_cancelled_by_pause'
+  if (controls.paused || controls.pausedChannelIds.includes(job.channelId)) return 'paused'
+  if (now.getTime() - job.publishAt.getTime() > lastStartMs) return 'too_late'
+  const [channel] = await transaction.select({ status: channels.status }).from(channels).where(eq(channels.id, job.channelId)).limit(1)
+  if (channel?.status !== 'active') return 'channel_inactive'
+  // Cancelled jobs do not count toward the daily limit, so one brought back must fit again.
+  const [count] = await transaction.select({ count: sql<number>`count(*)::int` }).from(jobs)
+    .where(and(eq(jobs.organizationId, job.organizationId), eq(jobs.channelId, job.channelId), notInArray(jobs.state, ['cancelled', 'failed']),
+      sql`(${jobs.publishAt} at time zone 'Europe/Rome')::date = (${job.publishAt.toISOString()}::timestamptz at time zone 'Europe/Rome')::date`))
+  if ((count?.count ?? 0) >= controls.maxPostsPerChannelPerDay) return 'daily_limit'
+  return 'restored'
 }
 
 export async function listJobs(context: EngineContext, organizationId: string, postId: string) {

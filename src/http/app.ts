@@ -11,7 +11,7 @@ import { z, ZodError } from 'zod'
 import { disableChannel, finishConnect, listChannels, readPublishing, setPublishing, startConnect } from '../channels.js'
 import type { EngineContext } from '../context.js'
 import { EngineError } from '../errors.js'
-import { cancelJobs, listJobs, reconcileJob, resolveJob, resolveJobSchema, submitJobs } from '../jobs/service.js'
+import { cancelJobs, listJobs, reconcileJob, resolveJob, resolveJobSchema, restoreJobs, submitJobs } from '../jobs/service.js'
 import { answeringHealth, publishingHealth } from '../jobs/health.js'
 import type { WorkerHealth } from '../jobs/worker.js'
 import { errorFields, log } from '../log.js'
@@ -118,6 +118,11 @@ export function createEngineApp(context: EngineContext, serviceToken: string, op
   router.post('/v1/jobs/cancel', authed(async event => {
     const body = z.strictObject({ organizationId, postId: identifier, revision: z.number().int().positive() }).parse(await readJson(event))
     return cancelJobs(context, body.organizationId, body.postId, body.revision)
+  }))
+  // Brings back jobs a pause cancelled, once publishing is no longer paused for their channel.
+  router.post('/v1/jobs/restore', authed(async event => {
+    const body = z.strictObject({ organizationId, postId: identifier, revision: z.number().int().positive() }).parse(await readJson(event))
+    return restoreJobs(context, body.organizationId, body.postId, body.revision)
   }))
   router.get('/v1/jobs', authed(async event => {
     const query = z.object({ organizationId, postId: identifier }).parse(getQuery(event))

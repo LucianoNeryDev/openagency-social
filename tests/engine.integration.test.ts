@@ -9,7 +9,7 @@ import type { Database } from '../src/db/client.js'
 import { channelActivity, webhookDeliveries, webhooks, type WebhookEventType, attempts, browserAccounts, channelCredentials, channelMetrics, channelMetricSamples, channels, events, jobs, media, postMetrics, postMetricSamples,
   postResponses, providerApps, responseChecks } from '../src/db/schema.js'
 import * as schema from '../src/db/schema.js'
-import { cancelJobs, listJobs, reconcileJob, resolveJob, submitJobs, type SubmitInput } from '../src/jobs/service.js'
+import { cancelJobs, listJobs, reconcileJob, resolveJob, restoreJobs, submitJobs, type SubmitInput } from '../src/jobs/service.js'
 import { claimNext, executeClaimed, interrupted, lastStartMs, markSent, maxAttempts, requeueUnsent, settleAttempt, sweep, Worker } from '../src/jobs/worker.js'
 import { pauseForRateLimit } from '../src/pause.js'
 import { publishingHealth } from '../src/jobs/health.js'
@@ -377,6 +377,56 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(await claimNext(context)).toBeNull()
       expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'cancelled', lastError: 'paused' })
       expect(adapter.published).toHaveLength(0)
+    })
+
+    it('brings back jobs a pause cancelled once it is lifted, while they can still start in time', async () => {
+      const [first, second] = await connect(['Bottega', 'Forno'])
+      const input = submission([first!.id, second!.id])
+      const other = submission([first!.id])
+      await submitJobs(context, input)
+      await submitJobs(context, other)
+      await cancelJobs(context, org, other.postId, 1)
+      await setPublishing(context, org, true, [])
+      advance(60 * 60_000)
+      expect(await claimNext(context)).toBeNull()
+      expect((await listJobs(context, org, input.postId)).jobs.map(job => job.lastError)).toEqual(['paused', 'paused'])
+
+      // Still paused: nothing comes back; then only the channel that is no longer paused does.
+      expect((await restoreJobs(context, org, input.postId, 1)).jobs.map(job => job.result)).toEqual(['paused', 'paused'])
+      await setPublishing(context, org, false, [second!.id])
+      advance(10 * 60_000)
+      const restored = await restoreJobs(context, org, input.postId, 1)
+      expect(restored.jobs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ channelId: first!.id, state: 'queued', result: 'restored' }),
+        expect.objectContaining({ channelId: second!.id, state: 'cancelled', result: 'paused' }),
+      ]))
+      expect((await db.select().from(events).where(eq(events.kind, 'job.restored')))).toHaveLength(1)
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published.map(published => published.channel.id)).toEqual([first!.id])
+
+      // A person's cancel stays; past the last start the job is too late.
+      expect((await restoreJobs(context, org, other.postId, 1)).jobs).toEqual([expect.objectContaining({ state: 'cancelled', result: 'not_cancelled_by_pause' })])
+      await setPublishing(context, org, false, [])
+      advance(50 * 60_000)
+      expect((await restoreJobs(context, org, input.postId, 1)).jobs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ channelId: second!.id, result: 'too_late' }),
+        expect.objectContaining({ channelId: first!.id, state: 'published', result: 'not_cancelled_by_pause' }),
+      ]))
+      await expect(restoreJobs(context, org, 'unknown-post', 1)).rejects.toMatchObject({ code: 'not_found' })
+    })
+
+    it('restores a job only while its channel\'s daily limit has room', async () => {
+      const [channel] = await connect()
+      await setPublishing(context, org, false, [], 1)
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      await setPublishing(context, org, true, [], 1)
+      advance(60 * 60_000)
+      expect(await claimNext(context)).toBeNull()
+      await setPublishing(context, org, false, [], 1)
+      // Another post took the day's only slot meanwhile.
+      await submitJobs(context, submission([channel!.id], { publishAt: new Date(now.getTime() + 60 * 60_000).toISOString() }))
+      expect((await restoreJobs(context, org, input.postId, 1)).jobs).toEqual([expect.objectContaining({ result: 'daily_limit', state: 'cancelled' })])
     })
 
     it('retries definite failures with backoff and stops after the limit', async () => {
@@ -1340,6 +1390,11 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
         expect(await call(`/v1/tenants/other-org/channel-metrics?channelIds=${channel!.id}`)).toEqual({ status: 200, body: { channels: [] } })
         expect(await call(`/v1/tenants/other-org/metrics/history?jobIds=${job!.id}`)).toEqual({ status: 200, body: { history: [] } })
         expect(await call(`/v1/tenants/other-org/responses`)).toEqual({ status: 200, body: { responses: [], status: [], cursor: null } })
+        // Restore answers per job; another tenant's post is not found.
+        expect(await call('/v1/jobs/restore', { method: 'POST', body: JSON.stringify({ organizationId: org, postId: job!.postId, revision: 1 }) }))
+          .toEqual({ status: 200, body: { jobs: [{ jobId: job!.id, channelId: channel!.id, state: 'published', result: 'not_cancelled_by_pause' }] } })
+        expect((await call('/v1/jobs/restore', { method: 'POST', body: JSON.stringify({ organizationId: 'other-org', postId: job!.postId, revision: 1 }) })).status)
+          .toBe(404)
       } finally {
         await new Promise<void>(resolve => server.close(() => resolve()))
       }

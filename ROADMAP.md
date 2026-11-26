@@ -8,6 +8,8 @@ Updated 2026-11-26.
 
 ## Done
 
+- Posts a pause cancelled brought back when it is lifted
+  (`POST /v1/jobs/restore`), while they can still start in time.
 - Videos checked on submit: length, codecs and size read from the MP4 at
   upload, and refused for Instagram reels and YouTube before any processing.
 - Rate limits: Meta's usage headers read, so reads pause before Meta
@@ -65,7 +67,6 @@ Updated 2026-11-26.
   change, so Portal reads them at once instead of on its schedule.
 
 - Publishing that agencies can rely on:
-  - Posts cancelled by a pause can be brought back when it is lifted.
   - Reconcile that finds a post without an exact caption match, and hidden
     Facebook posts; photos not uploaded again on each retry; longer timeouts
     for uploads and `media_publish`.
