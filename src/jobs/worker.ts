@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lt, lte, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm'
 import { lockControls, readPublishing } from '../channels.js'
 import { adapterFor, clock, recordEvent, type EngineContext } from '../context.js'
 import { attempts, channels, jobs, oauthStates, type JobState } from '../db/schema.js'
@@ -15,7 +15,7 @@ import { collectDueConversations, conversationsIntervalMs } from '../conversatio
 import { messagesIntervalMs, runMessages, sweepMessages } from '../messages.js'
 import { applyRetention, retentionIntervalMs } from '../retention.js'
 import { answeringIntervalMs, runAnswering } from '../answering/pipeline.js'
-import type { PublishOutcome } from '../platforms/types.js'
+import { AttemptClosedError, type PublishOutcome } from '../platforms/types.js'
 import { changeChannelStatus, deliverDueWebhooks, emitJobOutcome, webhooksIntervalMs } from '../webhooks.js'
 
 export const maxAttempts = 5
@@ -23,6 +23,8 @@ export const maxAttempts = 5
 export const maxLatenessMs = 60 * 60_000
 /** An attempt still open this long after its start or last heartbeat is treated as lost. */
 export const abandonedAfterMs = 10 * 60_000
+/** A queued job this long past its time has not started: readiness reports publishing as late. */
+export const lateStartMs = 15 * 60_000
 /** How often idle keep-alive grants are checked. */
 export const idleRefreshIntervalMs = 60 * 60_000
 
@@ -53,6 +55,7 @@ export async function claimNext(context: EngineContext): Promise<ClaimedJob | nu
           : now.getTime() - job.publishAt.getTime() > maxLatenessMs ? 'too_late' : null
       if (reason) {
         const state: JobState = reason === 'paused' ? 'cancelled' : 'failed'
+        log(reason === 'paused' ? 'info' : 'warn', 'job not started', { jobId: job.id, channelId: job.channelId, reason })
         const [updated] = await transaction.update(jobs).set({ state, lastError: reason, updatedAt: now }).where(eq(jobs.id, job.id)).returning()
         await recordEvent(transaction, { organizationId: job.organizationId, kind: `job.${state}`, jobId: job.id, channelId: job.channelId, detail: { reason } })
         await emitJobOutcome(transaction, updated!, now)
@@ -68,11 +71,15 @@ export async function claimNext(context: EngineContext): Promise<ClaimedJob | nu
   return null
 }
 
-export async function executeClaimed(context: EngineContext, claimed: ClaimedJob) {
+/** Not a platform outcome: the attempt was closed before its visible request, and its job is queued again. */
+export const interrupted = { kind: 'failed', retryable: true, code: 'interrupted', detail: 'Stopped before the post was sent' } as const
+
+export async function executeClaimed(context: EngineContext, claimed: ClaimedJob): Promise<PublishOutcome> {
   let outcome: PublishOutcome
   try {
     outcome = await publishClaimed(context, claimed)
   } catch (error) {
+    if (error instanceof AttemptClosedError) return interrupted
     // Unexpected failure inside the adapter: the post may exist.
     log('error', 'publish threw', { jobId: claimed.jobId, ...errorFields(error) })
     outcome = { kind: 'uncertain', code: 'internal', detail: 'Unexpected error during publish' }
@@ -104,6 +111,42 @@ async function publishClaimed(context: EngineContext, claimed: ClaimedJob): Prom
     ...(prepared.browserAccount ? { browserAccount: prepared.browserAccount } : {}),
     content: job.payload.content, media: prepared.files, settings: job.payload.settings,
     heartbeat: async () => { await context.db.update(attempts).set({ heartbeatAt: clock(context) }).where(eq(attempts.id, claimed.attemptId)) },
+    beforeVisible: () => markSent(context, claimed.attemptId),
+  })
+}
+
+/**
+ * Records that the visible request is about to go out, unless the attempt was
+ * closed meanwhile (by a stopping engine that queued the job again): then
+ * nothing may be sent. The row lock orders this against requeueUnsent.
+ */
+export async function markSent(context: EngineContext, attemptId: string) {
+  const now = clock(context)
+  const marked = await context.db.update(attempts).set({ sentAt: now, heartbeatAt: now })
+    .where(and(eq(attempts.id, attemptId), isNull(attempts.finishedAt))).returning({ id: attempts.id })
+  if (!marked.length) throw new AttemptClosedError()
+}
+
+/**
+ * Closes open attempts that never sent their visible request and queues their
+ * jobs again at once: nothing reached the platform. The interrupted attempt
+ * does not count against the job's tries. Returns the requeued job IDs.
+ */
+export async function requeueUnsent(context: EngineContext, attemptIds: string[], reason: 'interrupted' | 'abandoned') {
+  if (!attemptIds.length) return []
+  return context.db.transaction(async transaction => {
+    const now = clock(context)
+    const closed = await transaction.update(attempts).set({ finishedAt: now, outcome: 'failed_retryable', errorCode: reason, detail: 'Stopped before the post was sent' })
+      .where(and(inArray(attempts.id, attemptIds), isNull(attempts.finishedAt), isNull(attempts.sentAt))).returning({ jobId: attempts.jobId })
+    if (!closed.length) return []
+    const requeued = await transaction.update(jobs).set({ state: 'queued', notBefore: now, lastError: reason, updatedAt: now,
+      attemptCount: sql`greatest(${jobs.attemptCount} - 1, 0)` })
+      .where(and(inArray(jobs.id, closed.map(row => row.jobId)), eq(jobs.state, 'running'))).returning()
+    for (const job of requeued) {
+      await recordEvent(transaction, { organizationId: job.organizationId, kind: 'job.requeued', jobId: job.id, channelId: job.channelId, detail: { reason } })
+      await emitJobOutcome(transaction, job, now)
+    }
+    return requeued.map(job => job.id)
   })
 }
 
@@ -149,30 +192,52 @@ export async function settleAttempt(context: EngineContext, claimed: ClaimedJob,
   })
 }
 
-/** Turns attempts that outlived any request timeout into uncertain jobs. */
+/**
+ * Settles attempts that outlived any request timeout (their engine died):
+ * one that never sent its visible request is queued again, one that did
+ * turns its job uncertain.
+ */
 export async function sweep(context: EngineContext) {
   const now = clock(context)
   const cutoff = new Date(now.getTime() - abandonedAfterMs)
+  const lost = and(isNull(attempts.finishedAt), lt(sql`coalesce(${attempts.heartbeatAt}, ${attempts.startedAt})`, cutoff), eq(jobs.state, 'running'))
+  const unsent = await context.db.select({ attemptId: attempts.id }).from(attempts).innerJoin(jobs, eq(jobs.id, attempts.jobId))
+    .where(and(lost, isNull(attempts.sentAt)))
+  const requeued = await requeueUnsent(context, unsent.map(row => row.attemptId), 'abandoned')
+  if (requeued.length) log('warn', 'attempts abandoned before sending, queued again', { jobIds: requeued })
   const swept = await context.db.transaction(async transaction => {
     const open = await transaction.select({ attemptId: attempts.id, jobId: attempts.jobId }).from(attempts)
       .innerJoin(jobs, eq(jobs.id, attempts.jobId))
-      .where(and(isNull(attempts.finishedAt), lt(sql`coalesce(${attempts.heartbeatAt}, ${attempts.startedAt})`, cutoff), eq(jobs.state, 'running')))
+      .where(and(lost, isNotNull(attempts.sentAt)))
       .for('update', { of: jobs, skipLocked: true })
     if (!open.length) return []
     await transaction.update(attempts).set({ finishedAt: now, outcome: 'uncertain', errorCode: 'abandoned' })
       .where(inArray(attempts.id, open.map(row => row.attemptId)))
     const updated = await transaction.update(jobs).set({ state: 'uncertain', lastError: 'abandoned', updatedAt: now })
-      .where(inArray(jobs.id, open.map(row => row.jobId))).returning({ id: jobs.id, organizationId: jobs.organizationId, channelId: jobs.channelId })
-    for (const job of updated) await recordEvent(transaction, { organizationId: job.organizationId, kind: 'job.uncertain', jobId: job.id, channelId: job.channelId, detail: { reason: 'abandoned' } })
+      .where(inArray(jobs.id, open.map(row => row.jobId))).returning()
+    for (const job of updated) {
+      await recordEvent(transaction, { organizationId: job.organizationId, kind: 'job.uncertain', jobId: job.id, channelId: job.channelId, detail: { reason: 'abandoned' } })
+      await emitJobOutcome(transaction, job, now)
+    }
     return updated.map(job => job.id)
   })
   await context.db.delete(oauthStates).where(lt(oauthStates.expiresAt, new Date(now.getTime() - 86_400_000)))
   return swept
 }
 
+export interface WorkerHealth {
+  enabled: boolean
+  /** When the last tick finished; null before the first. */
+  lastTickAt: Date | null
+  pollMs: number
+}
+
 export class Worker {
   private timer: NodeJS.Timeout | undefined
-  private readonly running = new Set<Promise<unknown>>()
+  // Publish tasks in flight, with the attempt each one holds.
+  private readonly running = new Map<Promise<unknown>, ClaimedJob>()
+  private lastTickAt: Date | null = null
+  private enabled = false
   private stopping = false
   private ticking = false
   private lastIdleRefresh = 0
@@ -203,14 +268,39 @@ export class Worker {
   constructor(private readonly context: EngineContext, private readonly options: { concurrency: number, pollMs: number }) {}
 
   start() {
+    this.enabled = true
     this.timer = setInterval(() => void this.tick(), this.options.pollMs)
     void this.tick()
   }
 
-  async stop() {
+  health(): WorkerHealth {
+    return { enabled: this.enabled, lastTickAt: this.lastTickAt, pollMs: this.options.pollMs }
+  }
+
+  /**
+   * Stops claiming, then gives work in flight up to `graceMs` to finish. Half
+   * way, attempts that have not sent their visible request are closed and
+   * their jobs queued again (the next engine starts them at once); attempts
+   * that did send get the rest of the grace. Whatever is still open after it
+   * is left to the next engine's sweeper (uncertain, then reconcile).
+   */
+  async stop(graceMs = 25_000) {
     this.stopping = true
     clearInterval(this.timer)
-    await Promise.allSettled([...this.running, this.metrics, this.responses, this.replies, this.conversations, this.messages, this.retention, this.webhooks, this.answering])
+    const background = [this.metrics, this.responses, this.replies, this.conversations, this.messages, this.retention, this.webhooks, this.answering]
+    const settled = (ms: number) => Promise.race([
+      Promise.allSettled([...this.running.keys(), ...background]).then(() => true),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), ms).unref()),
+    ])
+    if (await settled(graceMs / 2)) return
+    const open = [...this.running.values()].map(claimed => claimed.attemptId)
+    const requeued = await requeueUnsent(this.context, open, 'interrupted').catch(error => {
+      log('error', 'requeue on shutdown failed', errorFields(error))
+      return []
+    })
+    if (requeued.length) log('info', 'jobs queued again on shutdown, nothing was sent', { jobIds: requeued })
+    if (await settled(graceMs / 2)) return
+    if (this.running.size) log('warn', 'shutdown grace over with attempts still open', { jobIds: [...this.running.values()].map(claimed => claimed.jobId) })
   }
 
   async tick() {
@@ -218,7 +308,7 @@ export class Worker {
     this.ticking = true
     try {
       const swept = await sweep(this.context)
-      if (swept.length) log('warn', 'attempts abandoned', { jobIds: swept })
+      if (swept.length) log('error', 'attempts abandoned after sending, jobs uncertain', { jobIds: swept })
       const sweptReplies = await sweepReplies(this.context)
       if (sweptReplies.length) log('warn', 'reply attempts abandoned', { replyIds: sweptReplies })
       const sweptMessages = await sweepMessages(this.context)
@@ -292,11 +382,13 @@ export class Worker {
         const claimed = await claimNext(this.context)
         if (!claimed) break
         const task = executeClaimed(this.context, claimed)
-          .then(outcome => log('info', 'job attempt finished', { jobId: claimed.jobId, outcome: outcome.kind, ...(outcome.kind === 'published' ? {} : { code: outcome.code }) }))
+          .then(outcome => log(outcome.kind === 'published' || outcome === interrupted ? 'info' : outcome.kind === 'uncertain' ? 'error' : 'warn',
+            'job attempt finished', { jobId: claimed.jobId, outcome: outcome.kind, ...(outcome.kind === 'published' ? {} : { code: outcome.code }) }))
           .catch(error => log('error', 'job settle failed', { jobId: claimed.jobId, ...errorFields(error) }))
           .finally(() => this.running.delete(task))
-        this.running.add(task)
+        this.running.set(task, claimed)
       }
+      this.lastTickAt = new Date()
     } catch (error) {
       log('error', 'worker tick failed', errorFields(error))
     } finally {

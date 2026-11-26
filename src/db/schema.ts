@@ -146,7 +146,7 @@ export interface JobPayload {
 export interface JobReceipt {
   externalId: string
   url?: string
-  settledBy: 'worker' | 'reconcile'
+  settledBy: 'worker' | 'reconcile' | 'operator'
 }
 
 export const jobs = pgTable('jobs', {
@@ -414,6 +414,9 @@ export const attempts = pgTable('attempts', {
   outcome: text('outcome').$type<AttemptOutcome>(),
   // Long-running drivers (the browser runner) beat while they wait, so the sweeper leaves them alone.
   heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
+  // When the request that can make the post visible was sent. An attempt that
+  // ends without it published nothing, so its job can be queued again.
+  sentAt: timestamp('sent_at', { withTimezone: true }),
   errorCode: text('error_code'),
   detail: text('detail'),
 }, table => [
@@ -652,7 +655,7 @@ export const outgoingMessageCancellations = pgTable('outgoing_message_cancellati
 // Webhooks: what a tenant's applications are told, and where.
 export const webhookEventTypes = ['post.published', 'post.failed', 'post.metrics.changed', 'channel.metrics.changed', 'comment.created',
   'channel.post.created', 'channel.profile.changed', 'channel.status.changed', 'reply.sent', 'reply.failed',
-  'message.received', 'message.sent', 'message.failed'] as const
+  'message.received', 'message.sent', 'message.failed', 'post.uncertain', 'post.cancelled'] as const
 export type WebhookEventType = typeof webhookEventTypes[number]
 export const webhookStatuses = ['active', 'disabled'] as const
 export type WebhookStatus = typeof webhookStatuses[number]
@@ -885,7 +888,7 @@ export const inboundDrafts = pgTable('inbound_drafts', {
   index('inbound_drafts_created').on(table.createdAt),
 ])
 
-export const controlEventTypes = ['drafts.available', 'messages.changed', 'replies.changed'] as const
+export const controlEventTypes = ['drafts.available', 'messages.changed', 'replies.changed', 'jobs.changed'] as const
 export type ControlEventType = typeof controlEventTypes[number]
 
 /**

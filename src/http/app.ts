@@ -11,7 +11,9 @@ import { z, ZodError } from 'zod'
 import { disableChannel, finishConnect, listChannels, readPublishing, setPublishing, startConnect } from '../channels.js'
 import type { EngineContext } from '../context.js'
 import { EngineError } from '../errors.js'
-import { cancelJobs, listJobs, reconcileJob, submitJobs } from '../jobs/service.js'
+import { cancelJobs, listJobs, reconcileJob, resolveJob, resolveJobSchema, submitJobs } from '../jobs/service.js'
+import { answeringHealth, publishingHealth } from '../jobs/health.js'
+import type { WorkerHealth } from '../jobs/worker.js'
 import { errorFields, log } from '../log.js'
 import { maxMediaBytes, readMedia, storeMedia } from '../media.js'
 import { maxHistoryDays, readChannelMetrics } from '../channel-metrics.js'
@@ -55,14 +57,16 @@ const requestKeyList = (max: number) => z.string().max(max * 65).transform(value
 
 type Handler = (event: H3Event<EventHandlerRequest>) => Promise<unknown>
 
-export function createEngineApp(context: EngineContext, serviceToken: string) {
+export function createEngineApp(context: EngineContext, serviceToken: string, options: { worker?: () => WorkerHealth } = {}) {
   const expected = digest(serviceToken)
   const router = createRouter()
 
   router.get('/healthz', defineEventHandler(() => ({ ok: true })))
+  // 200 while the database answers (the orchestrator's check). `publishing`
+  // and `answering` are for monitoring (docs/api.md). No tenant data.
   router.get('/readyz', route(async () => {
     await context.db.execute(sql`select 1`)
-    return { ok: true }
+    return { ok: true, ...await publishingHealth(context, options.worker?.()), ...await answeringHealth(context) }
   }))
 
   router.post('/v1/connect/start', authed(async event => {
@@ -273,6 +277,8 @@ export function createEngineApp(context: EngineContext, serviceToken: string) {
   }))
   router.post('/v1/tenants/:org/webhooks/:webhook/deliveries/:delivery/redeliver', authed(async event => redeliver(context,
     organizationId.parse(getRouterParam(event, 'org')), z.uuid().parse(getRouterParam(event, 'webhook')), z.uuid().parse(getRouterParam(event, 'delivery')))))
+  router.post('/v1/jobs/:id/resolve', authed(async event => resolveJob(context, z.uuid().parse(getRouterParam(event, 'id')),
+    resolveJobSchema.parse(await readJson(event)))))
   router.post('/v1/jobs/:id/reconcile', authed(async event => {
     const body = z.strictObject({ organizationId }).parse(await readJson(event))
     return reconcileJob(context, body.organizationId, z.uuid().parse(getRouterParam(event, 'id')))

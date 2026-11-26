@@ -48,6 +48,8 @@ export class BrowserAdapter implements PlatformAdapter {
     if (!settings.success) return { kind: 'failed', retryable: false, code: 'invalid_settings', detail: `Invalid ${this.rules.label} settings` }
 
     let action: RunnerAction
+    // Once submitted, the runner may click post at any time.
+    await input.beforeVisible?.()
     try {
       action = await this.runner.submit({
         actionId: input.attemptId, kind: 'publish_post', content: input.content, media,

@@ -45,13 +45,13 @@ const context: EngineContext = {
   ...(config.publicMediaUrl ? { publicMedia: { baseUrl: config.publicMediaUrl, key: publicMediaKey(config.serviceToken), lifetimeMs: 60 * 60_000 } } : {}),
 }
 
-const server = createServer(toNodeListener(createEngineApp(context, config.serviceToken)))
+const worker = new Worker(context, config.worker)
+const server = createServer(toNodeListener(createEngineApp(context, config.serviceToken, { worker: () => worker.health() })))
 // Long enough for the largest video; only the dashboard API reaches this port.
 server.requestTimeout = 15 * 60_000
 server.headersTimeout = 10_000
 server.listen(config.port, config.host, () => log('info', 'engine listening', { host: config.host, port: config.port }))
 
-const worker = new Worker(context, config.worker)
 if (config.worker.enabled) worker.start()
 // Events to the control plane, after the commits that queued them (ADR 0005).
 const controlEvents = config.controlPlaneEventsUrl
@@ -63,9 +63,9 @@ let stopping = false
 async function shutdown(signal: string) {
   if (stopping) return
   stopping = true
-  log('info', 'shutting down', { signal })
+  log('info', 'shutting down', { signal, graceMs: config.worker.shutdownGraceMs })
   server.close()
-  await worker.stop()
+  await worker.stop(config.worker.shutdownGraceMs)
   await controlEvents?.stop()
   await pool.end()
   process.exit(0)
