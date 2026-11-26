@@ -63,6 +63,10 @@ export async function submitJobs(context: EngineContext, input: SubmitInput) {
     for (const target of input.channels) {
       const channel = rows.find(row => row.id === target.channelId)!
       if (channel.status !== 'active') throw conflict('channel_inactive', `Channel ${channel.name} needs to be reconnected`)
+      // Instagram and the browser runner fetch media from PUBLIC_MEDIA_URL: refused now rather than failing when due.
+      if (input.mediaIds.length && !context.publicMedia && (channel.kind === 'instagram_account' || channel.platform === 'instagram' || channel.browserAccountId)) {
+        throw invalid('public_media_unavailable', `${channel.name} needs PUBLIC_MEDIA_URL to post media`)
+      }
       const adapter = adapterFor(context, channel.platform)
       adapter.validateSettings(channel.kind, target.settings, mediaInfo, input.content)
       const limits = adapter.limits(channel.kind)

@@ -4,6 +4,7 @@ import { adapterFor, clock, recordEvent, type EngineContext } from '../context.j
 import { attempts, channels, jobLanes, jobs, oauthStates, type JobLane, type JobState } from '../db/schema.js'
 import { channelDriver } from './driver.js'
 import { refreshIdleCredentials, TransientCredentialError } from '../credentials.js'
+import { EngineError } from '../errors.js'
 import { errorFields, log } from '../log.js'
 import { loadMedia, publicMediaUrl } from '../media.js'
 import { CallBudget } from '../budget.js'
@@ -104,7 +105,10 @@ async function publishClaimed(context: EngineContext, claimed: ClaimedJob): Prom
   if (!job || !channel) return { kind: 'failed', retryable: false, code: 'missing', detail: 'Job or channel missing' }
   // Nothing has been sent yet, so preparation failures are definite.
   let prepared
+  let adapter
   try {
+    // A platform this engine does not run (a browser channel without RUNNER_URL) is a definite failure, not an uncertain one.
+    adapter = adapterFor(context, channel.platform)
     const driver = await channelDriver(context, context.db, channel)
     const now = clock(context)
     const files = (await loadMedia(context.db, job.organizationId, job.payload.mediaIds)).map(file => ({ ...file,
@@ -114,9 +118,10 @@ async function publishClaimed(context: EngineContext, claimed: ClaimedJob): Prom
     log('error', 'job preparation failed', { jobId: job.id, ...errorFields(error) })
     // A token refresh that failed on the network can be tried again.
     if (error instanceof TransientCredentialError) return { kind: 'failed', retryable: true, code: 'token_refresh_failed', detail: error.message }
+    if (error instanceof EngineError && error.code === 'platform_unavailable') return { kind: 'failed', retryable: false, code: 'platform_unavailable', detail: error.message }
     return { kind: 'failed', retryable: false, code: 'preparation_failed', detail: error instanceof Error ? error.message : 'Preparation failed' }
   }
-  return adapterFor(context, channel.platform).publish(prepared.app, {
+  return adapter.publish(prepared.app, {
     attemptId: claimed.attemptId, channel: { id: channel.id, kind: channel.kind, externalId: channel.externalId }, token: prepared.token,
     ...(prepared.browserAccount ? { browserAccount: prepared.browserAccount } : {}),
     content: job.payload.content, media: prepared.files, settings: job.payload.settings,

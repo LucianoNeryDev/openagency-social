@@ -8,6 +8,8 @@ Updated 2026-11-26.
 
 ## Done
 
+- Instagram's failed media downloads retried, `PUBLIC_MEDIA_URL` checked at
+  start and on submit, and browser jobs without a runner failing cleanly.
 - Worker lanes: video posts and browser jobs have their own slots.
 - Revoked logins found before a post is due: a daily token check per
   channel, and background reads that mark a refused token `needs_reauth`.
@@ -54,9 +56,6 @@ Updated 2026-11-26.
   change, so Portal reads them at once instead of on its schedule.
 
 - Publishing that agencies can rely on:
-  - A failed media download by Instagram retried instead of rejected;
-    `PUBLIC_MEDIA_URL` checked at start and on submit; a browser job without a
-    runner configured fails instead of turning uncertain.
   - Rate limits: Meta's usage headers read, retries that wait for the limit's
     window, and the app-wide pause the readers set honoured by publishing.
   - A missing permission for one action no longer marks the whole channel as

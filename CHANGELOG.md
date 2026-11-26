@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Instagram's failed media download (subcodes 2207003, 2207020, 2207052, on
+  the container request or its status) is retried as `media_download_failed`
+  instead of failing for good. A post with media for Instagram or a browser
+  channel is refused at submit (`public_media_unavailable`) when
+  `PUBLIC_MEDIA_URL` is not set, and the engine says at start when the
+  address is unset or does not answer. A job whose platform this engine does
+  not run (a browser channel without `RUNNER_URL`) fails as
+  `platform_unavailable` instead of turning uncertain.
 - Worker lanes: each job gets a lane at submit (`standard`, `video` for any
   MP4, `browser` for browser channels; migration `0022` adds `jobs.lane` and
   sets it for queued and running jobs), and each lane has its own slots

@@ -563,6 +563,19 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
     })
   })
 
+  describe('platforms and media this engine cannot serve', () => {
+    it('fails a job definitely when its platform is not configured, instead of turning it uncertain', async () => {
+      const [channel] = await connect()
+      await submitJobs(context, submission([channel!.id]))
+      advance(60 * 60_000)
+      const claimed = await claimNext(context)
+      context.adapters.delete('meta')
+      expect(await executeClaimed(context, claimed!)).toMatchObject({ kind: 'failed', retryable: false, code: 'platform_unavailable' })
+      const [job] = await db.select().from(jobs).where(eq(jobs.id, claimed!.jobId))
+      expect(job).toMatchObject({ state: 'failed', lastError: 'platform_unavailable' })
+    })
+  })
+
   describe('worker lanes', () => {
     it('gives video and browser jobs their own slots, so they cannot hold standard posts back', async () => {
       const [page] = await connect()
@@ -774,6 +787,7 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
 
       const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), randomBytes(64)])
       const video = await storeMedia(context, org, 'clip.mp4', 'video/mp4', mp4)
+      context.publicMedia = { baseUrl: 'https://dash-api.example.com/api/social/media', key: publicMediaKey('s'.repeat(40)), lifetimeMs: 60 * 60_000 }
       expect(video).toMatchObject({ mimeType: 'video/mp4', width: null })
       const input = submission([linked.channelId], { mediaIds: [video.id] })
       await submitJobs(context, input)

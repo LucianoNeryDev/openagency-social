@@ -235,6 +235,11 @@ describe('Instagram', () => {
   it('fails without publishing when a container errors or never finishes', async () => {
     expect(await instagram([json({ id: '900' }), json({ status_code: 'ERROR', status: 'Error: 2207026' })]).adapter.publish(app, igInput()))
       .toMatchObject({ kind: 'failed', retryable: false, code: 'container_error' })
+    // Instagram could not fetch the file: nothing exists, and a later try with a fresh URL usually works.
+    expect(await instagram([json({ id: '900' }), json({ status_code: 'ERROR', status: 'Error: Media download has failed. (2207052)' })]).adapter.publish(app, igInput()))
+      .toMatchObject({ kind: 'failed', retryable: true, code: 'media_download_failed' })
+    expect(await instagram([graphError(400, 9004, { error_subcode: 2207052 })]).adapter.publish(app, igInput()))
+      .toMatchObject({ kind: 'failed', retryable: true, code: 'media_download_failed' })
     const slow = instagram([json({ id: '900' }), ...[1, 2, 3].map(() => json({ status_code: 'IN_PROGRESS' }))])
     expect(await slow.adapter.publish(app, igInput())).toMatchObject({ kind: 'failed', retryable: true, code: 'container_timeout' })
     expect(slow.calls.some(call => call.url.pathname.endsWith('media_publish'))).toBe(false)
