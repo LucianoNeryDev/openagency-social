@@ -8,8 +8,9 @@ import type {
   PublishInput, PublishOutcome, ReconcileInput, ReconcileOutcome, ReplyInput, ReplyOutcome, ReplyRules, ReplyTargetInput, ReplyTargetOutcome, ResolvedProviderApp,
   ResponsesInput, ResponsesResult, SendMessageInput, SendMessageOutcome,
 } from '../types.js'
-import { classify, guardRateLimit } from './classify.js'
-import { GraphClient, spendAfterFirst, type GraphOptions } from './graph.js'
+import { classify, guardRateLimit, watchUsage } from './classify.js'
+import { pickPost, type PostCandidate } from '../post-match.js'
+import { GraphClient, graphTime, spendAfterFirst, type GraphOptions } from './graph.js'
 import { facebookActivity, instagramActivity } from './activity.js'
 import { InstagramPublisher, validateInstagram, type ContainerPoll } from './instagram.js'
 import { findDirectMessage, readConversationMessages, readConversations, sendDirectMessage } from './messages.js'
@@ -61,7 +62,8 @@ const debugTokenSchema = z.object({ data: z.object({
 }) })
 const createdSchema = z.object({ id: z.string().regex(/^[\d_]+$/) })
 const feedSchema = z.object({
-  data: z.array(z.object({ id: z.string(), message: z.string().optional(), created_time: z.string().optional(), permalink_url: z.string().optional() })).max(100),
+  data: z.array(z.object({ id: z.string(), message: z.string().optional(), created_time: z.string().optional(), permalink_url: z.string().optional(),
+    is_hidden: z.boolean().optional() })).max(100),
 })
 const facebookSettingsSchema = z.strictObject({
   // Creates a hidden Page post. Used for end-to-end tests on real Pages.
@@ -69,6 +71,14 @@ const facebookSettingsSchema = z.strictObject({
   // Shared link with Facebook's preview card. Not combinable with photos.
   link: z.url({ protocol: /^https$/ }).max(2_000).optional(),
 })
+
+/**
+ * How long an unpublished Page photo is used again by a retry. Meta keeps
+ * unpublished photos about 24 hours
+ * (https://developers.facebook.com/docs/graph-api/reference/page/photos/);
+ * retries end within the hour, and each kept photo is read before it is used.
+ */
+export const photoReuseMs = 6 * 3_600_000
 
 export class MetaAdapter implements PlatformAdapter {
   readonly platform = 'meta' as const
@@ -171,17 +181,27 @@ export class MetaAdapter implements PlatformAdapter {
     const call = { token: input.token, appSecret: app.secret }
 
     // Photos are uploaded unpublished first; they are not visible on their
-    // own, so a failure here is not a publish and can be retried.
+    // own, so a failure here is not a publish and can be retried. A retry
+    // uses again the photos an earlier attempt uploaded, while they last.
+    const now = Date.now()
+    const kept = new Map((input.uploads ?? []).filter(upload => now - Date.parse(upload.uploadedAt) < photoReuseMs).map(upload => [upload.mediaId, upload.externalId]))
     const photoIds: string[] = []
     for (const file of input.media) {
+      const previous = kept.get(file.id)
+      if (previous && await this.photoExists(call, previous)) {
+        photoIds.push(previous)
+        continue
+      }
       try {
-        const created = createdSchema.parse(await this.graph.request('POST', `/${page}/photos`, { ...call, form: {
+        const created = createdSchema.parse(await this.graph.request('POST', `/${page}/photos`, { ...call, timeoutMs: this.graph.timeouts.upload, form: {
           published: 'false', source: new Blob([new Uint8Array(await mediaFileBytes(file))], { type: file.mimeType }),
         } }))
         photoIds.push(created.id)
+        await input.recordUpload?.({ mediaId: file.id, externalId: created.id, uploadedAt: new Date().toISOString() })
       } catch (error) {
         return classify(error, false)
       }
+      await input.heartbeat?.()
     }
 
     const form: Record<string, string> = { message: input.content }
@@ -191,11 +211,18 @@ export class MetaAdapter implements PlatformAdapter {
     let created: z.infer<typeof createdSchema>
     await input.beforeVisible?.()
     try {
-      created = createdSchema.parse(await this.graph.request('POST', `/${page}/feed`, { ...call, form }))
+      created = createdSchema.parse(await this.graph.request('POST', `/${page}/feed`, { ...call, timeoutMs: this.graph.timeouts.publish, form }))
     } catch (error) {
       return classify(error, true)
     }
     return { kind: 'published', externalId: created.id, url: `https://www.facebook.com/${created.id}` }
+  }
+
+  /** Whether an unpublished photo an earlier attempt uploaded can still be attached. Any doubt uploads it again. */
+  private async photoExists(call: { token: string, appSecret: string }, id: string) {
+    if (!/^\d+$/.test(id)) return false
+    return this.graph.request('GET', `/${id}`, { ...call, query: { fields: 'id' } })
+      .then(value => createdSchema.safeParse(value).data?.id === id, () => false)
   }
 
   async checkCredential(app: ResolvedProviderApp | null, input: { channel: ChannelTarget, token: string, spendCall?: () => void }) {
@@ -207,26 +234,33 @@ export class MetaAdapter implements PlatformAdapter {
   async reconcile(app: ResolvedProviderApp | null, input: ReconcileInput): Promise<ReconcileOutcome> {
     if (!app) throw new Error('Meta channels need their provider app')
     if (input.channel.kind === 'instagram_account') return this.instagram.reconcile({ token: input.token, appSecret: app.secret }, input)
-    const result = feedSchema.parse(await this.graph.request('GET', `/${input.channel.externalId}/published_posts`, {
-      token: input.token, appSecret: app.secret,
-      query: { fields: 'id,message,created_time,permalink_url', since: String(Math.floor(input.since.getTime() / 1000)), limit: '100' },
+    const call = { token: input.token, appSecret: app.secret }
+    const since = String(Math.floor(input.since.getTime() / 1000))
+    const candidates = (posts: z.infer<typeof feedSchema>['data']): PostCandidate[] => posts.map(post => ({ id: post.id, text: post.message ?? null,
+      createdAt: graphTime(post.created_time), ...(post.permalink_url ? { url: post.permalink_url } : {}) }))
+    const published = feedSchema.parse(await this.graph.request('GET', `/${input.channel.externalId}/published_posts`, {
+      ...call, query: { fields: 'id,message,created_time,permalink_url', since, limit: '100' },
     }))
-    const matches = result.data.filter(post => post.message === input.content && !input.excludeExternalIds.includes(post.id))
-    if (matches.length === 1) return { kind: 'published', externalId: matches[0]!.id, url: matches[0]!.permalink_url }
-    if (matches.length === 0) return { kind: 'not_found' }
-    return { kind: 'ambiguous', detail: `${matches.length} posts match the content` }
+    const found = pickPost(candidates(published.data), input)
+    if (found.kind !== 'not_found') return found
+    // A post the Page hid, or one made with `unpublished`, is not among the published posts; the feed lists it with include_hidden.
+    const feed = feedSchema.parse(await this.graph.request('GET', `/${input.channel.externalId}/feed`, {
+      ...call, query: { fields: 'id,message,created_time,permalink_url,is_hidden', since, limit: '100', include_hidden: 'true' },
+    }))
+    const known = new Set(published.data.map(post => post.id))
+    return pickPost(candidates([...published.data, ...feed.data.filter(post => !known.has(post.id))]), input)
   }
 
   async metrics(app: ResolvedProviderApp | null, input: MetricsInput): Promise<MetricsResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall) }
+    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramMediaMetrics(this.graph, call, input.externalId))
     return guardRateLimit(() => facebookPostMetrics(this.graph, call, input.externalId))
   }
 
   async accountMetrics(app: ResolvedProviderApp | null, input: AccountMetricsInput): Promise<AccountMetricsResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall) }
+    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }
     const now = input.now ?? new Date()
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramAccountMetrics(this.graph, call, input.channel.externalId, now))
     return guardRateLimit(() => facebookPageMetrics(this.graph, call, input.channel.externalId, now))
@@ -234,14 +268,14 @@ export class MetaAdapter implements PlatformAdapter {
 
   async accountActivity(app: ResolvedProviderApp | null, input: AccountActivityInput): Promise<AccountActivityResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall) }
+    const call = { token: input.token, appSecret: app.secret, ...spendAfterFirst(input.spendCall), ...watchUsage(input.slowDown) }
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramActivity(this.graph, call, input.channel.externalId, { login: false }))
     return guardRateLimit(() => facebookActivity(this.graph, call, input.channel.externalId))
   }
 
   async responses(app: ResolvedProviderApp | null, input: ResponsesInput): Promise<ResponsesResult> {
     if (!app) throw new Error('Meta channels need their provider app')
-    const call = { token: input.token, appSecret: app.secret }
+    const call = { token: input.token, appSecret: app.secret, ...watchUsage(input.slowDown) }
     if (input.channel.kind === 'instagram_account') return guardRateLimit(() => instagramResponses(this.graph, call, input, 'instagram_manage_comments'))
     return guardRateLimit(() => facebookResponses(this.graph, call, input))
   }

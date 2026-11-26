@@ -4,7 +4,7 @@ import { clock, type EngineContext } from './context.js'
 import { channelActivity, jobs, type channels } from './db/schema.js'
 import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
-import { pauseForRateLimit } from './pause.js'
+import { pauseForRateLimit, SlowDown } from './pause.js'
 import { RateLimited, ReauthRequired, type ChannelProfile, type PlatformPost } from './platforms/types.js'
 import { emitWebhookEvents } from './webhooks.js'
 import { markNeedsReauth } from './token-check.js'
@@ -61,8 +61,9 @@ export async function collectChannelActivity(context: EngineContext, channel: ty
   const base = { channelId: channel.id, organizationId: channel.organizationId }
   try {
     const { app, token } = await channelDriver(context, context.db, channel)
+    const slowDown = new SlowDown()
     const result = await adapter.accountActivity(app, { channel: { id: channel.id, kind: channel.kind, externalId: channel.externalId }, token,
-      spendCall: () => budget?.spend(channel.platform) })
+      spendCall: () => budget?.spend(channel.platform), slowDown: slowDown.note })
     const finished = clock(context)
     const profile: Record<string, string | null> = { ...result.profile }
     const changed = profileChanges(previous?.profile ?? null, result.profile)
@@ -88,6 +89,7 @@ export async function collectChannelActivity(context: EngineContext, channel: ty
             jobId: byExternalId.get(post.externalId)?.id ?? null, postId: byExternalId.get(post.externalId)?.postId ?? null })) })
       }
     })
+    await slowDown.apply(context.db, channel, finished)
     return 'read' as const
   } catch (error) {
     const finished = clock(context)

@@ -9,8 +9,9 @@ import type { Database } from '../src/db/client.js'
 import { channelActivity, webhookDeliveries, webhooks, type WebhookEventType, attempts, browserAccounts, channelCredentials, channelMetrics, channelMetricSamples, channels, events, jobs, media, postMetrics, postMetricSamples,
   postResponses, providerApps, responseChecks } from '../src/db/schema.js'
 import * as schema from '../src/db/schema.js'
-import { cancelJobs, listJobs, reconcileJob, resolveJob, submitJobs, type SubmitInput } from '../src/jobs/service.js'
-import { claimNext, executeClaimed, interrupted, markSent, maxAttempts, requeueUnsent, settleAttempt, sweep, Worker } from '../src/jobs/worker.js'
+import { cancelJobs, listJobs, reconcileJob, resolveJob, restoreJobs, submitJobs, type SubmitInput } from '../src/jobs/service.js'
+import { claimNext, executeClaimed, interrupted, lastStartMs, markSent, maxAttempts, requeueUnsent, settleAttempt, sweep, Worker } from '../src/jobs/worker.js'
+import { pauseForRateLimit } from '../src/pause.js'
 import { publishingHealth } from '../src/jobs/health.js'
 import { AttemptClosedError } from '../src/platforms/types.js'
 import { maxImageBytes, mediaChunkBytes, mediaFileBytes, mediaSignature, publicMediaKey, readMedia, storeMedia } from '../src/media.js'
@@ -32,6 +33,7 @@ import { openSecret, runnerKeyPair } from '../src/crypto/sealed.js'
 import { checkBrowserLogin, linkBrowserChannel, listBrowserAccounts, putBrowserAccount } from '../src/vault.js'
 import type { RunnerClient } from '../src/platforms/browser/runner-client.js'
 import { postgresFixture } from './fixtures/postgres.js'
+import { mp4 } from './fixtures/mp4.js'
 import { createWebhook, deleteWebhook, deliverDueWebhooks, deliveryRetryDelaysMs, listDeliveries, listWebhooks, maxDeliveryAttempts, redeliver,
   rotateWebhookSecret, testWebhook, updateWebhook } from '../src/webhooks.js'
 import { signWebhook, type WebhookRequest, type WebhookResult } from '../src/webhook-sender.js'
@@ -262,6 +264,19 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(row).toEqual({ data: null, sha256: createHash('sha256').update(whole).digest('hex') })
     })
 
+    it('reads a video\'s length and codecs at upload, even with moov after a chunk of media data, and hands them to submit checks', async () => {
+      const whole = mp4({ moovLast: true, mdatBytes: mediaChunkBytes + 1_000, durationMs: 95_000, width: 1920, height: 1080, rotate: true, videoCodec: 'hvc1' })
+      const stored = await storeMedia(context, org, 'reel.mp4', 'video/mp4', pieces(whole.subarray(0, 100), whole.subarray(100, mediaChunkBytes + 7), whole.subarray(mediaChunkBytes + 7)))
+      expect(stored).toMatchObject({ width: 1080, height: 1920, durationMs: 95_000, videoCodec: 'hvc1', audioCodec: 'mp4a' })
+      const [channel] = await connect()
+      await submitJobs(context, submission([channel!.id], { mediaIds: [stored.id] }))
+      expect(adapter.validated[0]).toEqual([{ id: stored.id, mimeType: 'video/mp4', sizeBytes: whole.length, width: 1080, height: 1920,
+        durationMs: 95_000, videoCodec: 'hvc1', audioCodec: 'mp4a' }])
+      // A file that does not say keeps nulls, and is let through.
+      const unknown = await storeMedia(context, org, 'odd.mp4', 'video/mp4', Buffer.concat([mp4Head, randomBytes(64)]))
+      expect(unknown).toMatchObject({ durationMs: null, videoCodec: null, audioCodec: null })
+    })
+
     it('keeps nothing of an upload that is refused or breaks part way', async () => {
       const before = (await db.select({ id: media.id }).from(media)).length
       await expect(storeMedia(context, org, 'a.mp4', 'video/mp4', Buffer.from('not a video at all'))).rejects.toMatchObject({ code: 'invalid_media' })
@@ -317,7 +332,7 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       context.publicMedia = { baseUrl: 'https://dash-api.example.com/api/social/media', key, lifetimeMs: 3_600_000 }
       const input = submission([channel!.id], { mediaIds: [image.id] })
       await submitJobs(context, input)
-      expect(adapter.validated).toEqual([[{ id: image.id, mimeType: 'image/png', sizeBytes: 40, width: 1080, height: 1350 }]])
+      expect(adapter.validated).toEqual([[{ id: image.id, mimeType: 'image/png', sizeBytes: 40, width: 1080, height: 1350, durationMs: null, videoCodec: null, audioCodec: null }]])
       advance(60 * 60_000)
       expect(await runDue()).toMatchObject({ kind: 'published' })
       const url = new URL(adapter.published[0]!.media[0]!.publicUrl!)
@@ -364,6 +379,56 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(adapter.published).toHaveLength(0)
     })
 
+    it('brings back jobs a pause cancelled once it is lifted, while they can still start in time', async () => {
+      const [first, second] = await connect(['Bottega', 'Forno'])
+      const input = submission([first!.id, second!.id])
+      const other = submission([first!.id])
+      await submitJobs(context, input)
+      await submitJobs(context, other)
+      await cancelJobs(context, org, other.postId, 1)
+      await setPublishing(context, org, true, [])
+      advance(60 * 60_000)
+      expect(await claimNext(context)).toBeNull()
+      expect((await listJobs(context, org, input.postId)).jobs.map(job => job.lastError)).toEqual(['paused', 'paused'])
+
+      // Still paused: nothing comes back; then only the channel that is no longer paused does.
+      expect((await restoreJobs(context, org, input.postId, 1)).jobs.map(job => job.result)).toEqual(['paused', 'paused'])
+      await setPublishing(context, org, false, [second!.id])
+      advance(10 * 60_000)
+      const restored = await restoreJobs(context, org, input.postId, 1)
+      expect(restored.jobs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ channelId: first!.id, state: 'queued', result: 'restored' }),
+        expect.objectContaining({ channelId: second!.id, state: 'cancelled', result: 'paused' }),
+      ]))
+      expect((await db.select().from(events).where(eq(events.kind, 'job.restored')))).toHaveLength(1)
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published.map(published => published.channel.id)).toEqual([first!.id])
+
+      // A person's cancel stays; past the last start the job is too late.
+      expect((await restoreJobs(context, org, other.postId, 1)).jobs).toEqual([expect.objectContaining({ state: 'cancelled', result: 'not_cancelled_by_pause' })])
+      await setPublishing(context, org, false, [])
+      advance(50 * 60_000)
+      expect((await restoreJobs(context, org, input.postId, 1)).jobs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ channelId: second!.id, result: 'too_late' }),
+        expect.objectContaining({ channelId: first!.id, state: 'published', result: 'not_cancelled_by_pause' }),
+      ]))
+      await expect(restoreJobs(context, org, 'unknown-post', 1)).rejects.toMatchObject({ code: 'not_found' })
+    })
+
+    it('restores a job only while its channel\'s daily limit has room', async () => {
+      const [channel] = await connect()
+      await setPublishing(context, org, false, [], 1)
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      await setPublishing(context, org, true, [], 1)
+      advance(60 * 60_000)
+      expect(await claimNext(context)).toBeNull()
+      await setPublishing(context, org, false, [], 1)
+      // Another post took the day's only slot meanwhile.
+      await submitJobs(context, submission([channel!.id], { publishAt: new Date(now.getTime() + 60 * 60_000).toISOString() }))
+      expect((await restoreJobs(context, org, input.postId, 1)).jobs).toEqual([expect.objectContaining({ result: 'daily_limit', state: 'cancelled' })])
+    })
+
     it('retries definite failures with backoff and stops after the limit', async () => {
       const [channel] = await connect()
       const input = submission([channel!.id])
@@ -382,6 +447,35 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect((await listJobs(context, org, input.postId)).jobs[0]!.state).toBe('failed')
     })
 
+    it('hands a retry the uploads earlier attempts kept, the newest per file', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      let round = 0
+      adapter.beforeVisible = async publish => {
+        round++
+        if (round === 1) {
+          await publish.recordUpload!({ mediaId: 'm1', externalId: '501', uploadedAt: now.toISOString() })
+          await publish.recordUpload!({ mediaId: 'm2', externalId: '502', uploadedAt: now.toISOString() })
+        }
+        if (round === 2) await publish.recordUpload!({ mediaId: 'm2', externalId: '602', uploadedAt: now.toISOString() })
+      }
+      adapter.outcomes = [{ kind: 'failed', retryable: true, code: 'unreachable', detail: 'down' }, { kind: 'failed', retryable: true, code: 'unreachable', detail: 'down' }]
+      await runDue()
+      expect(adapter.published[0]!.uploads).toBeUndefined()
+      advance(60_000)
+      await runDue()
+      expect(adapter.published[1]!.uploads).toEqual(expect.arrayContaining([expect.objectContaining({ mediaId: 'm1', externalId: '501' }),
+        expect.objectContaining({ mediaId: 'm2', externalId: '502' })]))
+      expect(adapter.published[1]!.uploads).toHaveLength(2)
+      advance(2 * 60_000)
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published[2]!.uploads).toEqual(expect.arrayContaining([expect.objectContaining({ mediaId: 'm1', externalId: '501' }),
+        expect.objectContaining({ mediaId: 'm2', externalId: '602' })]))
+      expect(adapter.published[2]!.uploads).toHaveLength(2)
+    })
+
     it('fails a job that is more than an hour late without calling the platform', async () => {
       const [channel] = await connect()
       const input = submission([channel!.id])
@@ -390,6 +484,57 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(await claimNext(context)).toBeNull()
       expect((await listJobs(context, org, input.postId)).jobs[0]).toMatchObject({ state: 'failed', lastError: 'too_late' })
       expect(adapter.published).toHaveLength(0)
+    })
+
+    it('holds a job back while a rate limit pauses its channel, and tries it when waiting would make it too late', async () => {
+      const [first, second] = await connect(['Bottega', 'Forno'])
+      const held = submission([first!.id])
+      const tried = submission([second!.id])
+      await submitJobs(context, held)
+      await submitJobs(context, tried)
+      advance(60 * 60_000)
+      const [row] = await db.select().from(channels).where(eq(channels.id, first!.id))
+      const [other] = await db.select().from(channels).where(eq(channels.id, second!.id))
+      // The readers paused one channel for 20 minutes and the other for two hours.
+      await pauseForRateLimit(db, row!, new RateLimited('usage', 'channel', new Date(now.getTime() + 20 * 60_000)), now)
+      await pauseForRateLimit(db, other!, new RateLimited('usage', 'channel', new Date(now.getTime() + 2 * 3_600_000)), now)
+
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published.map(input => input.channel.id)).toEqual([second!.id])
+      expect(await claimNext(context)).toBeNull()
+      const [job] = (await listJobs(context, org, held.postId)).jobs
+      expect(job).toMatchObject({ state: 'queued', attemptCount: 0 })
+      const [stored] = await db.select().from(jobs).where(eq(jobs.id, job!.id))
+      expect(stored!.notBefore).toEqual(new Date(now.getTime() + 20 * 60_000))
+      const deferred = await db.select().from(events).where(eq(events.jobId, job!.id))
+      expect(deferred.map(event => event.kind)).toContain('job.deferred')
+
+      advance(20 * 60_000)
+      expect(await runDue()).toMatchObject({ kind: 'published' })
+      expect(adapter.published.map(input => input.channel.id)).toEqual([second!.id, first!.id])
+    })
+
+    it('retries a rate-limited publish when the limit lifts, never past the lateness limit', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      const publishAt = new Date(now)
+      adapter.outcomes = [
+        { kind: 'failed', retryable: true, code: 'rate_limited', detail: '80001', retryAt: new Date(now.getTime() + 25 * 60_000) },
+        { kind: 'failed', retryable: true, code: 'rate_limited', detail: '80001', retryAt: new Date(now.getTime() + 5 * 3_600_000) },
+      ]
+      await runDue()
+      const [first] = await db.select().from(jobs)
+      expect(first).toMatchObject({ state: 'queued', lastError: 'rate_limited' })
+      expect(first!.notBefore).toEqual(new Date(now.getTime() + 25 * 60_000))
+      advance(25 * 60_000)
+      await runDue()
+      const [second] = await db.select().from(jobs)
+      // The limit outlasts the hour: one last try a minute inside it.
+      expect(second!.notBefore).toEqual(new Date(publishAt.getTime() + lastStartMs))
+      advance(publishAt.getTime() + lastStartMs - now.getTime())
+      expect(await runDue()).toMatchObject({ kind: 'published' })
     })
 
     it('marks the channel for reauthorization on auth failures', async () => {
@@ -1148,6 +1293,20 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(after!.nextCheckAt.getTime() - now.getTime()).toBe(2 * minute)
     })
 
+    it('keeps a read whose usage is high and pauses the app before Meta refuses', async () => {
+      const { channels: connected } = await published(['Bottega', 'Forno'])
+      adapter.metricsWith = async input => {
+        input.slowDown?.(new RateLimited('Meta usage is high (app 93%)', 'app', new Date(now.getTime() + 15 * minute)))
+        return { values: { likes: 9 }, unavailable: [] }
+      }
+      expect((await collectDueMetrics(context)).failed).toBe(0)
+      expect((await db.select().from(postMetrics)).map(row => row.values)).toContainEqual({ likes: 9 })
+      const paused = await db.select().from(channelMetrics)
+      expect(paused.map(row => row.channelId).sort()).toEqual(connected.map(channel => channel.id).sort())
+      for (const row of paused) expect(row.pausedUntil).toEqual(new Date(now.getTime() + 15 * minute))
+      expect(await collectDueMetrics(context)).toEqual({ collected: 0, failed: 0 })
+    })
+
     it('pauses every channel on the provider app when the limit is the app\'s', async () => {
       const { channels: connected } = await published(['Bottega', 'Forno'])
       adapter.responsesWith = async () => { throw new RateLimited('Graph returned 400 (code 4)', 'app') }
@@ -1260,6 +1419,11 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
         expect(await call(`/v1/tenants/other-org/channel-metrics?channelIds=${channel!.id}`)).toEqual({ status: 200, body: { channels: [] } })
         expect(await call(`/v1/tenants/other-org/metrics/history?jobIds=${job!.id}`)).toEqual({ status: 200, body: { history: [] } })
         expect(await call(`/v1/tenants/other-org/responses`)).toEqual({ status: 200, body: { responses: [], status: [], cursor: null } })
+        // Restore answers per job; another tenant's post is not found.
+        expect(await call('/v1/jobs/restore', { method: 'POST', body: JSON.stringify({ organizationId: org, postId: job!.postId, revision: 1 }) }))
+          .toEqual({ status: 200, body: { jobs: [{ jobId: job!.id, channelId: channel!.id, state: 'published', result: 'not_cancelled_by_pause' }] } })
+        expect((await call('/v1/jobs/restore', { method: 'POST', body: JSON.stringify({ organizationId: 'other-org', postId: job!.postId, revision: 1 }) })).status)
+          .toBe(404)
       } finally {
         await new Promise<void>(resolve => server.close(() => resolve()))
       }

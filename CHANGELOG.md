@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+- Reconcile finds a post whose caption Meta changed: captions are compared
+  normalised (NFKC, without emoji variation selectors and zero-width
+  characters, whitespace collapsed), and when none matches whole, the first
+  60 characters of a caption of at least 20 match a post made within 30
+  minutes of the attempt. On Facebook, posts the Page hid (or made with
+  `unpublished`) are looked for in the feed with `include_hidden` when the
+  published posts have no match.
+- Facebook photos are not uploaded again on each retry: an attempt keeps
+  the unpublished photo IDs it uploaded (migration `0024`, a nullable
+  `attempts.uploads`), and a retry within six hours attaches them again
+  after checking each still exists.
+- Longer Graph timeouts for what Meta answers slowly: 3 minutes for photo
+  uploads and Instagram containers, 2 minutes for the feed post and
+  `media_publish` (20 seconds otherwise). docs/deploy.md gives a matching
+  shutdown grace.
+- Posts a pause cancelled can be brought back: `POST /v1/jobs/restore`
+  `{organizationId, postId, revision}` queues again the revision's jobs
+  that were cancelled when they came due during a pause (`lastError`
+  `paused`), once publishing is no longer paused for their channel, and
+  answers per job `restored`, `paused`, `too_late` (more than 59 minutes
+  past `publishAt`), `channel_inactive`, `daily_limit` or
+  `not_cancelled_by_pause`. Each restore records `job.restored` and sends
+  `jobs.changed`.
+- Videos checked on submit: an MP4's `moov` box is read as the upload
+  arrives (`mvhd` duration, the video track's display size after rotation
+  and its codec, the sound track's codec), stored on `media` (migration
+  `0023`, nullable `duration_ms`, `video_codec`, `audio_codec`) and
+  returned by the upload. Submit refuses an Instagram reel that is not
+  H.264 or HEVC with AAC, shorter than 3 seconds, longer than 15 minutes or
+  over 300 MB, and a YouTube video without a video track, in an uncommon
+  codec or over 12 hours, with `video_too_large`, `video_too_short`,
+  `video_too_long` or `unsupported_codec`. Videos stored before are checked
+  for size only.
+- Rate limits: the Graph client reads Meta's `X-App-Usage` and
+  `X-Business-Use-Case-Usage` headers on every answer. A background read
+  (post and account numbers, comments, account activity) that sees any
+  figure at 90% or more, or a time to regain access, keeps its result and
+  pauses the channel (the whole app for the app's own figures) for Meta's
+  estimate or 15 minutes, before Meta starts refusing. A refused read pauses
+  until `estimated_time_to_regain_access` when Meta gives it. A rate-limited
+  publish is retried when the limit lifts (`retryAt`), and any retry is
+  scheduled no later than 59 minutes past `publishAt`, as a last try instead
+  of failing `too_late`. A job whose channel is paused for a rate limit is
+  not started until the pause ends (`notBefore` moves, event `job.deferred`),
+  unless that is more than 59 minutes past `publishAt`: then it is tried.
+- A missing permission for one action no longer marks the whole channel as
+  needing a new login: Meta's codes 10 and 200-299 and YouTube's
+  `insufficientPermissions`, `forbidden` and `youtubeSignupRequired` fail the
+  job as `permission_missing`; only an invalid token (Meta 190 or 102,
+  Google 401 or `authError`) is `auth` with a new login.
 - Instagram's failed media download (subcodes 2207003, 2207020, 2207052, on
   the container request or its status) is retried as `media_download_failed`
   instead of failing for good. A post with media for Instagram or a browser

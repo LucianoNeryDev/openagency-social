@@ -8,6 +8,20 @@ Updated 2026-11-26.
 
 ## Done
 
+- Reconcile that finds a post whose caption Meta changed, and hidden
+  Facebook posts; Facebook photos kept for retries instead of uploaded
+  again; longer timeouts for uploads and the publishing request.
+- Posts a pause cancelled brought back when it is lifted
+  (`POST /v1/jobs/restore`), while they can still start in time.
+- Videos checked on submit: length, codecs and size read from the MP4 at
+  upload, and refused for Instagram reels and YouTube before any processing.
+- Rate limits: Meta's usage headers read, so reads pause before Meta
+  refuses them; rate-limited publishes retried when the limit lifts; and
+  publishing holds a job back while its channel or app is paused.
+- The platform access each feature needs, documented
+  ([docs/platform-access.md](docs/platform-access.md)).
+- A missing permission for one action fails that job, without asking the
+  channel for a new login.
 - Instagram's failed media downloads retried, `PUBLIC_MEDIA_URL` checked at
   start and on submit, and browser jobs without a runner failing cleanly.
 - Worker lanes: video posts and browser jobs have their own slots.
@@ -54,21 +68,6 @@ Updated 2026-11-26.
 - Revising a draft from a person's instruction ("make it shorter").
 - Events to Portal: a signed nudge when drafts, messages or reply receipts
   change, so Portal reads them at once instead of on its schedule.
-
-- Publishing that agencies can rely on:
-  - Rate limits: Meta's usage headers read, retries that wait for the limit's
-    window, and the app-wide pause the readers set honoured by publishing.
-  - A missing permission for one action no longer marks the whole channel as
-    needing a new login.
-  - Videos checked on submit (size, duration, codec) instead of failing
-    after minutes of processing.
-  - Posts cancelled by a pause can be brought back when it is lifted.
-  - Reconcile that finds a post without an exact caption match, and hidden
-    Facebook posts; photos not uploaded again on each retry; longer timeouts
-    for uploads and `media_publish`.
-  - The platform access each feature needs, documented: which Meta
-    permissions need Advanced Access through App Review and Business
-    Verification, and the Google project's verification and consent screen.
 
 ## Next
 

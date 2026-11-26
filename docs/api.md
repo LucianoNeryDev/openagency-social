@@ -13,15 +13,21 @@ JSON (at most 1 MB) except media uploads. Errors have the shape
 | `POST /v1/connect/finish` | `{organizationId, state, code}` → `{channels}`. Called by the dashboard's OAuth callback. |
 | `GET /v1/tenants/:org/channels` | `{channels: [{id, platform, kind, name, externalId, status, maxLength, maxMedia, replies, messages}]}`. Tokens are never returned. `replies` and `messages` are `{available, maxLength?, reason?, permission?}`; see "Replies" and "Direct messages". |
 | `POST /v1/tenants/:org/channels/:id/disable` | Removes the credential, and the channel's responses, replies and conversations. `409 channel_busy` while a job, a reply or a message on the channel is unsettled. |
-| `GET`/`PUT /v1/tenants/:org/publishing` | `{paused, pausedChannelIds, maxPostsPerChannelPerDay?}`. A paused tenant or channel accepts no new jobs, and due jobs are cancelled instead of run. The daily limit (default 10, at most 100) counts non-cancelled, non-failed jobs per channel per calendar day in Europe/Rome. |
+| `GET`/`PUT /v1/tenants/:org/publishing` | `{paused, pausedChannelIds, maxPostsPerChannelPerDay?}`. A paused tenant or channel accepts no new jobs, and due jobs are cancelled instead of run (`lastError` `paused`; `POST /v1/jobs/restore` brings them back once the pause is lifted). The daily limit (default 10, at most 100) counts non-cancelled, non-failed jobs per channel per calendar day in Europe/Rome. |
 
 ## Media
 
 `POST /v1/tenants/:org/media?name=<file name>` with a raw JPEG or PNG body of
 at most 10 MB, or an MP4 of at most 1 GB, and `Content-Type` matching the file.
 The body may be chunked; the file is stored as it arrives, 16 MiB at a time.
-Returns `201 {id, name, mimeType, sizeBytes, width, height}`; the pixel size
-comes from the file header and is null when it cannot be read.
+Returns `201 {id, name, mimeType, sizeBytes, width, height, durationMs,
+videoCodec, audioCodec}`; the pixel size comes from the file header and is
+null when it cannot be read. For an MP4 the engine reads the `moov` box as
+the file arrives (before or after the media data): `durationMs`, the first
+video track's display size after its rotation, and the codecs as MP4
+sample entries (`avc1` H.264, `hvc1`/`hev1` HEVC, `av01`, `vp09`; `mp4a`
+AAC, `Opus`), null when there is no such track or the file does not say.
+Images have null there.
 
 `GET /v1/tenants/:org/media/:id` streams the raw bytes. The dashboard API uses
 it to serve signed public URLs, because Instagram fetches images from a URL.
@@ -55,7 +61,10 @@ identical content returns the existing jobs (`200`); different content or
 channels for that revision is `409 revision_conflict`. Other refusals:
 `publish_at_too_soon` (under five minutes), `paused`, `channel_inactive`,
 `content_too_long`, `too_many_media`, `invalid_settings`, `daily_limit`,
-`media_required`, `unsupported_media`, `aspect_ratio`, `not_found`.
+`media_required`, `unsupported_media`, `aspect_ratio`, `not_found`, and for
+videos `video_too_large`, `video_too_short`, `video_too_long` and
+`unsupported_codec`. Videos stored before their length and codecs were read
+are checked for size only.
 
 Facebook Page settings: `{"link": "https://…"}` shares a link with its preview
 card (not combinable with images); `{"unpublished": true}` creates a hidden
@@ -81,8 +90,11 @@ between 4:5 and 1.91:1 (several become a carousel), and no settings. A reel is
 one MP4 video, optionally followed by one JPEG cover, with the settings
 `{"shareToFeed": true, "thumbOffsetMs": 15000}` (both optional; the offset
 picks the cover frame when no cover image is attached). The caption is limited
-to 2,200 characters. A reel's video can take minutes to process; the attempt
-beats while it waits.
+to 2,200 characters. The video must be H.264 or HEVC with AAC sound (or
+none), 3 seconds to 15 minutes long and at most 300 MB, as Instagram's
+[reel specifications](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media#reel-specifications)
+ask; 9:16 is recommended. A reel's video can take minutes to process; the
+attempt beats while it waits.
 
 YouTube channels take one MP4 video, optionally followed by a JPEG or PNG
 thumbnail of at most 2 MB (set after the upload; ignored when the channel may
@@ -97,13 +109,18 @@ bytes. Settings:
 `title` (1 to 100 characters) is required; the rest are optional, with
 `privacy` `public`, `unlisted` or `private` (default `public`) and
 `madeForKids` defaulting to false. Titles and descriptions may not contain `<`
-or `>`. A vertical video up to three minutes long becomes a Short.
+or `>`. The video may use any common codec (H.264, HEVC, AV1, VP9, VP8,
+MPEG-4 Part 2, ProRes) and last up to 12 hours; a channel YouTube has not
+verified is held to 15 minutes, which only the upload reveals. A square or
+vertical video up to three minutes long becomes a Short; a longer one is an
+ordinary video.
 
 | Route | Purpose |
 | --- | --- |
 | `POST /v1/jobs/cancel` | `{organizationId, postId, revision}` → per job `cancelled`, or `too_late` with its current state. |
+| `POST /v1/jobs/restore` | `{organizationId, postId, revision}` brings back the jobs a pause cancelled (`cancelled` with `lastError` `paused`), for Portal's "Ripristina" once the pause is lifted → per job `{jobId, channelId, state, result}`. `result` is `restored` (queued again, `lastError` null, to start now or at `publishAt` if still ahead), `paused` (publishing is still paused for its channel), `too_late` (more than 59 minutes past `publishAt`: submit a new revision), `channel_inactive`, `daily_limit` (the channel's day filled up meanwhile) or `not_cancelled_by_pause` (any other state, or cancelled by a person). Unknown post: `404`. |
 | `GET /v1/jobs?organizationId=&postId=` | Jobs with state, attempt count, receipt and last error. |
-| `POST /v1/jobs/:id/reconcile` | `{organizationId}`. Reads the platform for an `uncertain` job: `published`, `failed`, `ambiguous` or `too_early`. |
+| `POST /v1/jobs/:id/reconcile` | `{organizationId}`. Reads the platform for an `uncertain` job: `published`, `failed`, `ambiguous` or `too_early`. A post matches when its caption equals the job's once both are normalised (Unicode NFKC, emoji variation selectors and zero-width characters removed, whitespace collapsed), or, when none does, when the first 60 characters of a caption of 20 or more agree and the post appeared within 30 minutes of the attempt (Meta may trim a caption or change its hashtags and emojis). Posts other jobs hold are skipped. On Facebook, posts the Page hid or made with `unpublished` are found in the feed (`include_hidden`) when the published posts have no match. |
 | `POST /v1/jobs/:id/resolve` | A person settles an `uncertain` job: `{organizationId, outcome: "published", externalId, url?, resolvedByUserId}` (the post's platform ID, so metrics and replies keep working; refused with `receipt_taken` when another post of the channel has it) or `{organizationId, outcome: "not_published", resolvedByUserId}` (`failed`, `resolved_not_published`; submit a new revision to post it). Any other state: `409 not_uncertain`. |
 
 Job states: `queued`, `running`, `published`, `failed`, `uncertain`,
@@ -119,6 +136,23 @@ dies, the job is queued again at once, and that attempt does not count
 against its tries. Only an attempt that sent and got no answer makes the job
 `uncertain`. A job more than an hour past `publishAt` is not started any
 more and fails as `too_late`.
+
+A Facebook post's photos are uploaded unpublished before the feed post;
+each upload is kept on its attempt (`uploads`), and a retry of the job
+attaches the same photos again, after checking each still exists, instead of
+uploading them anew (for six hours; Meta keeps unpublished photos about a
+day). Uploads, Instagram's containers, the feed post and `media_publish`
+get 3 minutes (uploads and containers) and 2 minutes (the publishing
+request) before the attempt gives up, instead of a read's 20 seconds.
+
+Rate limits: a retryable failure is tried again after 1, 2, 4 and 8
+minutes, or, for a rate limit whose end Meta gives
+(`estimated_time_to_regain_access`), when it ends; never later than 59
+minutes past `publishAt`, which is the last try. A job whose channel the
+readers have paused for a rate limit (below) is not started until the pause
+ends: its `notBefore` moves to the end, recorded as `job.deferred`, and the
+job stays `queued`. When the pause would end more than 59 minutes past
+`publishAt`, the job is tried at once instead.
 
 `GET /readyz` (no token) answers 200 while the database does, with
 `publishing`: `ok`, `stalled` (the worker has not finished a pass for four
@@ -183,9 +217,14 @@ minutes for a week, hourly for a month, every 6 hours until day 90, then stops;
 YouTube runs slower (10 min, 30 min, 3 h, 12 h) to spare the project's daily
 quota. A watched post is read about every 30 seconds (2 minutes on YouTube); many
 watched posts on one channel share its checks, so each is read less often. A
-platform rate limit pauses every read on the channel for an hour; an app-wide
+platform rate limit pauses every read on the channel for an hour, or until
+Meta's `estimated_time_to_regain_access`; an app-wide
 limit pauses every channel on that app (YouTube's daily quota until midnight
-Pacific time). A missing permission is reported and asked about
+Pacific time). The readers also pause before Meta refuses: when a read's
+`X-App-Usage` reaches 90% of any figure, every channel on the app waits 15
+minutes; when its `X-Business-Use-Case-Usage` does, or gives a time to
+regain access, the channel waits that long (15 minutes without one). The read
+that saw it keeps its result. Publishing honours these pauses (see Jobs). A missing permission is reported and asked about
 again daily. Responses are deleted 180 days after the post's publish time, and
 at once when the channel is disabled. Only the text, the author's display name
 or username, counts, times and the comment's link are stored.

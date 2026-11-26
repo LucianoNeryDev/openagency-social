@@ -7,14 +7,14 @@ import { mediaFile } from './fixtures/media.js'
 const app: ResolvedProviderApp = { id: 'meta-test', platform: 'meta', externalAppId: '111', secret: 'app-secret-123', settings: { configId: '222' } }
 const redirectUri = 'https://dash-api.example.com/api/social/connect/meta/callback'
 
-interface Call { method: string, url: URL, headers: Record<string, string>, body: FormData | URLSearchParams | undefined }
+interface Call { method: string, url: URL, headers: Record<string, string>, body: FormData | URLSearchParams | undefined, signal?: AbortSignal }
 type Reply = (call: Call) => Response | Promise<Response>
 
 function fakeGraph(replies: Reply[], options: Partial<ConstructorParameters<typeof MetaAdapter>[0]> = {}) {
   const calls: Call[] = []
   const fetcher = (async (input: URL | string | Request, init?: RequestInit) => {
     const call: Call = { method: init?.method ?? 'GET', url: new URL(String(input)), headers: init?.headers as Record<string, string>,
-      body: init?.body as FormData | URLSearchParams | undefined }
+      body: init?.body as FormData | URLSearchParams | undefined, signal: init?.signal ?? undefined }
     calls.push(call)
     const reply = replies.shift()
     if (!reply) throw new Error(`Unexpected call ${call.method} ${call.url}`)
@@ -125,7 +125,8 @@ describe('Meta publish', () => {
   it('classifies Graph errors', async () => {
     const cases: Array<[Reply, Record<string, unknown>]> = [
       [graphError(400, 190), { kind: 'failed', retryable: false, code: 'auth', reauth: true }],
-      [graphError(403, 200), { kind: 'failed', retryable: false, code: 'auth', reauth: true }],
+      [graphError(403, 200), { kind: 'failed', retryable: false, code: 'permission_missing' }],
+      [graphError(403, 10), { kind: 'failed', retryable: false, code: 'permission_missing' }],
       [graphError(400, 32), { kind: 'failed', retryable: true, code: 'rate_limited' }],
       [graphError(500, 2, { is_transient: true }), { kind: 'uncertain', code: 'platform_error' }],
       [graphError(400, 100), { kind: 'failed', retryable: false, code: 'rejected' }],
@@ -136,6 +137,62 @@ describe('Meta publish', () => {
       expect(outcome).toMatchObject(expected)
       if (outcome.kind !== 'published') expect(outcome.detail).not.toContain('EAAsecret')
     }
+  })
+
+  it('uses again the photos an earlier attempt uploaded, and uploads one that is gone or too old', async () => {
+    const recorded: Array<{ mediaId: string, externalId: string }> = []
+    const { adapter, calls } = fakeGraph([json({ id: '501' }), graphError(400, 100), json({ id: '602' }), json({ id: '603' }), json({ id: '1000000000000101_9' })])
+    const fresh = new Date(Date.now() - 30 * 60_000).toISOString()
+    const outcome = await adapter.publish(app, input({
+      media: [mediaFile('m1', 'a.jpg', 'image/jpeg', Buffer.from('a')), mediaFile('m2', 'b.jpg', 'image/jpeg', Buffer.from('b')), mediaFile('m3', 'c.jpg', 'image/jpeg', Buffer.from('c'))],
+      uploads: [{ mediaId: 'm1', externalId: '501', uploadedAt: fresh }, { mediaId: 'm2', externalId: '502', uploadedAt: fresh },
+        // Too old to trust: uploaded again without asking.
+        { mediaId: 'm3', externalId: '503', uploadedAt: new Date(Date.now() - 7 * 3_600_000).toISOString() }],
+      recordUpload: async upload => { recorded.push(upload) },
+    }))
+    expect(outcome).toMatchObject({ kind: 'published' })
+    expect(calls.map(call => `${call.method} ${call.url.pathname}`)).toEqual(['GET /v26.0/501', 'GET /v26.0/502',
+      'POST /v26.0/1000000000000101/photos', 'POST /v26.0/1000000000000101/photos', 'POST /v26.0/1000000000000101/feed'])
+    expect(recorded).toMatchObject([{ mediaId: 'm2', externalId: '602' }, { mediaId: 'm3', externalId: '603' }])
+  })
+
+  it('keeps each new upload for the next attempt and attaches the kept ones', async () => {
+    const recorded: Array<{ mediaId: string, externalId: string }> = []
+    const { adapter, calls } = fakeGraph([json({ id: '501' }), json({ id: '602' }), json({ id: '1000000000000101_9' })])
+    const outcome = await adapter.publish(app, input({
+      media: [mediaFile('m1', 'a.jpg', 'image/jpeg', Buffer.from('a')), mediaFile('m2', 'b.jpg', 'image/jpeg', Buffer.from('b'))],
+      uploads: [{ mediaId: 'm1', externalId: '501', uploadedAt: new Date().toISOString() }],
+      recordUpload: async upload => { recorded.push(upload) },
+    }))
+    expect(outcome).toMatchObject({ kind: 'published', externalId: '1000000000000101_9' })
+    expect(calls.map(call => `${call.method} ${call.url.pathname}`)).toEqual(['GET /v26.0/501', 'POST /v26.0/1000000000000101/photos', 'POST /v26.0/1000000000000101/feed'])
+    expect(recorded).toMatchObject([{ mediaId: 'm2', externalId: '602' }])
+    const body = calls[2]!.body as URLSearchParams
+    expect([body.get('attached_media[0]'), body.get('attached_media[1]')]).toEqual([JSON.stringify({ media_fbid: '501' }), JSON.stringify({ media_fbid: '602' })])
+  })
+
+  it('gives uploads and the feed post longer than a read', async () => {
+    const slow = (body: unknown) => (call: Call) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify(body), { status: 200 })), 60)
+      call.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })) })
+    })
+    const options = { timeoutMs: 10, uploadTimeoutMs: 2_000, publishTimeoutMs: 2_000 }
+    const { adapter } = fakeGraph([slow({ id: '501' }), slow({ id: '1000000000000101_9' })], options)
+    expect(await adapter.publish(app, input({ media: [mediaFile('m1', 'a.jpg', 'image/jpeg', Buffer.from('a'))] }))).toMatchObject({ kind: 'published' })
+    const reads = fakeGraph([slow({ id: '1000000000000101' })], options)
+    await expect(reads.adapter.checkCredential(app, { channel: input().channel, token: 't' })).rejects.toThrow()
+  })
+
+  it('retries a rate-limited publish when Meta says access returns', async () => {
+    const before = Date.now()
+    const { adapter } = fakeGraph([() => new Response(JSON.stringify({ error: { message: 'limit', code: 32 } }), { status: 400, headers: {
+      'x-business-use-case-usage': JSON.stringify({ 1000000000000101: [{ type: 'pages', call_count: 100, total_time: 1, total_cputime: 1, estimated_time_to_regain_access: 12 }] }) } })])
+    const outcome = await adapter.publish(app, input())
+    expect(outcome).toMatchObject({ kind: 'failed', retryable: true, code: 'rate_limited' })
+    const retry = outcome.kind === 'failed' ? outcome.retryAt : undefined
+    expect(retry!.getTime()).toBeGreaterThanOrEqual(before + 12 * 60_000)
+    // Without an estimate the worker's backoff decides.
+    expect(await fakeGraph([graphError(400, 32)]).adapter.publish(app, input())).not.toHaveProperty('retryAt')
   })
 
   it('rejects settings it does not know', () => {
@@ -280,8 +337,34 @@ describe('Meta reconcile', () => {
   })
 
   it('reports no match and ambiguous matches', async () => {
-    expect(await fakeGraph([json({ data: [] })]).adapter.reconcile(app, reconcileInput)).toEqual({ kind: 'not_found' })
+    expect(await fakeGraph([json({ data: [] }), json({ data: [] })]).adapter.reconcile(app, reconcileInput)).toEqual({ kind: 'not_found' })
     expect((await fakeGraph([json({ data: [{ id: '1_2', message: 'Ciao Brescia' }, { id: '1_3', message: 'Ciao Brescia' }] })]).adapter.reconcile(app, reconcileInput)).kind).toBe('ambiguous')
+  })
+
+  const long = 'Da domani il nuovo menu d\'autunno è in carta: zucca, funghi e castagne. Vi aspettiamo! 🍂 #brescia #ristorante'
+  const at = (minutes: number) => new Date(reconcileInput.since.getTime() + minutes * 60_000).toISOString().replace('.000Z', '+0000')
+
+  it('matches a caption Meta changed in spacing, Unicode form or emoji presentation', async () => {
+    const { adapter } = fakeGraph([json({ data: [{ id: '1_4', message: `  ${long.replace(' ', '\n\n').replace('🍂', '🍂\uFE0F').normalize('NFD')}  `, created_time: at(2) }] })])
+    expect(await adapter.reconcile(app, { ...reconcileInput, content: long })).toMatchObject({ kind: 'published', externalId: '1_4' })
+  })
+
+  it('matches on the start of a long caption within half an hour, when Meta changed its hashtags', async () => {
+    const changed = long.replace('#brescia #ristorante', '#Brescia')
+    const { adapter } = fakeGraph([json({ data: [{ id: '1_5', message: changed, created_time: at(3) }] })])
+    expect(await adapter.reconcile(app, { ...reconcileInput, content: long })).toMatchObject({ kind: 'published', externalId: '1_5' })
+    const late = fakeGraph([json({ data: [{ id: '1_6', message: changed, created_time: at(45) }] }), json({ data: [] })])
+    expect(await late.adapter.reconcile(app, { ...reconcileInput, content: long })).toEqual({ kind: 'not_found' })
+    // A short caption says too little: only the whole of it counts.
+    const short = fakeGraph([json({ data: [{ id: '1_7', message: 'Ciao Brescia!', created_time: at(1) }] }), json({ data: [] })])
+    expect(await short.adapter.reconcile(app, reconcileInput)).toEqual({ kind: 'not_found' })
+  })
+
+  it('finds a hidden post in the feed when it is not among the published posts', async () => {
+    const { adapter, calls } = fakeGraph([json({ data: [] }), json({ data: [{ id: '1_8', message: 'Ciao Brescia', created_time: at(1), is_hidden: true }] })])
+    expect(await adapter.reconcile(app, reconcileInput)).toMatchObject({ kind: 'published', externalId: '1_8' })
+    expect(calls[1]!.url.pathname).toBe('/v26.0/1000000000000101/feed')
+    expect(calls[1]!.url.searchParams.get('include_hidden')).toBe('true')
   })
 })
 
@@ -415,6 +498,45 @@ describe('Meta account metrics', () => {
     }
     const { adapter } = fakeGraph([graphError(500, 2)])
     await expect(adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now })).rejects.not.toBeInstanceOf(RateLimited)
+  })
+  const withUsage = (body: unknown, usage: Record<string, unknown>, status = 200) => () => new Response(JSON.stringify(body), { status,
+    headers: { 'content-type': 'application/json', ...Object.fromEntries(Object.entries(usage).map(([key, value]) => [key, JSON.stringify(value)])) } })
+
+  it('keeps a read\'s result and asks to slow down when Meta\'s usage reaches 90%', async () => {
+    const { adapter } = fakeGraph([
+      withUsage({ id: '1000000000000101', followers_count: 1520 }, { 'x-app-usage': { call_count: 92, total_time: 10, total_cputime: 10 } }),
+      withUsage({ data: [] }, { 'x-business-use-case-usage': { 1000000000000101: [{ type: 'pages', call_count: 40, total_time: 5, total_cputime: 5,
+        estimated_time_to_regain_access: 0 }] } }),
+    ])
+    const limits: RateLimited[] = []
+    const result = await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now, slowDown: limit => limits.push(limit) })
+    expect(result.values.followers).toBe(1520)
+    expect(limits).toHaveLength(1)
+    expect(limits[0]!.scope).toBe('app')
+  })
+
+  it('stays quiet while usage is low', async () => {
+    const { adapter } = fakeGraph([withUsage({ followers_count: 3 }, { 'x-app-usage': { call_count: 89, total_time: 89, total_cputime: 89 } }), json({ data: [] })])
+    const limits: RateLimited[] = []
+    await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now, slowDown: limit => limits.push(limit) })
+    expect(limits).toEqual([])
+  })
+
+  it('pauses a refused read until Meta says access returns', async () => {
+    const before = Date.now()
+    const { adapter } = fakeGraph([withUsage({ error: { message: 'limit', code: 80001 } }, { 'x-business-use-case-usage': { 1000000000000101: [
+      { type: 'pages', call_count: 100, total_time: 20, total_cputime: 20, estimated_time_to_regain_access: 25 }] } }, 400)])
+    const error = await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now }).catch((value: unknown) => value)
+    expect(error).toBeInstanceOf(RateLimited)
+    expect((error as RateLimited).scope).toBe('channel')
+    expect((error as RateLimited).until!.getTime()).toBeGreaterThanOrEqual(before + 25 * 60_000)
+    expect((error as RateLimited).until!.getTime()).toBeLessThan(Date.now() + 26 * 60_000)
+  })
+
+  it('a refusal while the app\'s own usage is full pauses the whole app', async () => {
+    const { adapter } = fakeGraph([withUsage({ error: { message: 'limit', code: 613 } }, { 'x-app-usage': { call_count: 100, total_time: 40, total_cputime: 40 } }, 400)])
+    const error = await adapter.accountMetrics(app, { channel: page, token: 'page-token-abc', now }).catch((value: unknown) => value)
+    expect((error as RateLimited).scope).toBe('app')
   })
 })
 
