@@ -23,6 +23,7 @@ import { CallBudget } from '../src/budget.js'
 import { collectDueChannelMetrics, readChannelMetrics } from '../src/channel-metrics.js'
 import { createEngineApp } from '../src/http/app.js'
 import { collectDueResponses, readResponses, watchResponses } from '../src/responses.js'
+import { checkDueTokens } from '../src/token-check.js'
 import { applyRetention } from '../src/retention.js'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -86,6 +87,12 @@ class FakeAdapter implements PlatformAdapter {
   async accountActivity(_app: unknown, input: AccountActivityInput) {
     this.activityCalls.push(input)
     return this.activityWith(input)
+  }
+  checks: string[] = []
+  checkWith: () => Promise<void> = async () => undefined
+  async checkCredential(_app: unknown, input: { channel: { id: string }, token: string }) {
+    this.checks.push(input.channel.id)
+    return this.checkWith()
   }
   keepAlive = false
   refreshes: ChannelCredential[] = []
@@ -556,6 +563,79 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
     })
   })
 
+  describe('platforms and media this engine cannot serve', () => {
+    it('fails a job definitely when its platform is not configured, instead of turning it uncertain', async () => {
+      const [channel] = await connect()
+      await submitJobs(context, submission([channel!.id]))
+      advance(60 * 60_000)
+      const claimed = await claimNext(context)
+      context.adapters.delete('meta')
+      expect(await executeClaimed(context, claimed!)).toMatchObject({ kind: 'failed', retryable: false, code: 'platform_unavailable' })
+      const [job] = await db.select().from(jobs).where(eq(jobs.id, claimed!.jobId))
+      expect(job).toMatchObject({ state: 'failed', lastError: 'platform_unavailable' })
+    })
+  })
+
+  describe('worker lanes', () => {
+    it('gives video and browser jobs their own slots, so they cannot hold standard posts back', async () => {
+      const [page] = await connect()
+      const stored = await storeMedia(context, org, 'clip.mp4', 'video/mp4', Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), randomBytes(64)]))
+      const reel = submission([page!.id], { mediaIds: [stored.id] })
+      const photo = submission([page!.id], { publishAt: new Date(now.getTime() + 61 * 60_000).toISOString() })
+      await submitJobs(context, reel)
+      await submitJobs(context, photo)
+      expect((await listJobs(context, org, reel.postId)).jobs[0]).toBeDefined()
+      const [reelJob] = await db.select().from(jobs).where(eq(jobs.postId, reel.postId))
+      const [photoJob] = await db.select().from(jobs).where(eq(jobs.postId, photo.postId))
+      expect([reelJob!.lane, photoJob!.lane]).toEqual(['video', 'standard'])
+      advance(62 * 60_000)
+      // The video slot is full: only a standard job can be claimed, though the reel is older.
+      expect(await claimNext(context, ['standard'])).toMatchObject({ jobId: photoJob!.id, lane: 'standard' })
+      expect(await claimNext(context, ['standard'])).toBeNull()
+      expect(await claimNext(context, ['video'])).toMatchObject({ jobId: reelJob!.id, lane: 'video' })
+    })
+  })
+
+  describe('token check', () => {
+    it('proves each token once a day and marks a refused one needs_reauth before a post is due', async () => {
+      const [first, second] = await connect(['Bottega', 'Forno'])
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 2, valid: 2, refused: 0 })
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 0 })
+      advance(25 * 60 * 60_000)
+      adapter.checkWith = async () => { throw new ReauthRequired('Error validating access token: The user has not authorized application.') }
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 2, refused: 2 })
+      const listed = await listChannels(context, org)
+      expect(listed.map(channel => channel.status)).toEqual(['needs_reauth', 'needs_reauth'])
+      const kinds = (await db.select().from(events).where(eq(events.channelId, first!.id))).map(row => row.kind)
+      expect(kinds).toContain('channel.needs_reauth')
+      // Inactive channels are not checked again.
+      advance(25 * 60 * 60_000)
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 0 })
+      expect(second).toBeDefined()
+    })
+
+    it('a transient error leaves the channel active and due again', async () => {
+      await connect()
+      adapter.checkWith = async () => { throw new Error('socket hang up') }
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 0, failed: 1 })
+      adapter.checkWith = async () => undefined
+      expect(await checkDueTokens(context)).toMatchObject({ checked: 1, valid: 1 })
+      expect((await listChannels(context, org))[0]).toMatchObject({ status: 'active' })
+    })
+
+    it('a background read refused for the token marks the channel needs_reauth', async () => {
+      const [channel] = await connect()
+      const input = submission([channel!.id])
+      await submitJobs(context, input)
+      advance(60 * 60_000)
+      await runDue()
+      adapter.metricsWith = async () => { throw new ReauthRequired('Error validating access token') }
+      advance(2 * 60 * 60_000)
+      await collectDueMetrics(context)
+      expect((await listChannels(context, org))[0]).toMatchObject({ status: 'needs_reauth' })
+    })
+  })
+
   describe('channels', () => {
     it('refuses to disable a channel with unsettled jobs, then removes its credential', async () => {
       const [channel] = await connect()
@@ -707,6 +787,7 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
 
       const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), randomBytes(64)])
       const video = await storeMedia(context, org, 'clip.mp4', 'video/mp4', mp4)
+      context.publicMedia = { baseUrl: 'https://dash-api.example.com/api/social/media', key: publicMediaKey('s'.repeat(40)), lifetimeMs: 60 * 60_000 }
       expect(video).toMatchObject({ mimeType: 'video/mp4', width: null })
       const input = submission([linked.channelId], { mediaIds: [video.id] })
       await submitJobs(context, input)

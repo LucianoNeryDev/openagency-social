@@ -71,6 +71,9 @@ const environmentSchema = z.object({
     'must be https, or http on a loopback address, without credentials or fragment').optional()),
   WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform(value => value === 'true'),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+  // Their own slots, beside WORKER_CONCURRENCY's standard ones (docs/deploy.md).
+  WORKER_VIDEO_SLOTS: z.coerce.number().int().min(1).max(8).default(1),
+  WORKER_BROWSER_SLOTS: z.coerce.number().int().min(1).max(8).default(1),
   WORKER_POLL_MS: z.coerce.number().int().min(250).max(60_000).default(5_000),
   // How long a stopping engine lets publishes in flight finish (docs/deploy.md); keep it under the orchestrator's kill timeout.
   SHUTDOWN_GRACE_MS: z.coerce.number().int().min(1_000).max(30 * 60_000).default(25_000),
@@ -102,6 +105,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     anthropicApiKey: value.ANTHROPIC_API_KEY,
     liquidApiKey: value.LIQUID_API_KEY,
     controlPlaneEventsUrl: value.CONTROL_PLANE_EVENTS_URL,
-    worker: { enabled: value.WORKER_ENABLED, concurrency: value.WORKER_CONCURRENCY, pollMs: value.WORKER_POLL_MS, shutdownGraceMs: value.SHUTDOWN_GRACE_MS },
+    worker: { enabled: value.WORKER_ENABLED, concurrency: value.WORKER_CONCURRENCY, slots: { video: value.WORKER_VIDEO_SLOTS, browser: value.WORKER_BROWSER_SLOTS }, pollMs: value.WORKER_POLL_MS, shutdownGraceMs: value.SHUTDOWN_GRACE_MS },
   }
 }

@@ -17,6 +17,9 @@ export const channelStatuses = ['active', 'needs_reauth', 'disabled'] as const
 export type ChannelStatus = typeof channelStatuses[number]
 export const jobStates = ['queued', 'running', 'published', 'failed', 'uncertain', 'cancelled'] as const
 export type JobState = typeof jobStates[number]
+/** Worker lanes: video and browser jobs have their own slots, so a few long ones cannot hold other posts back. */
+export const jobLanes = ['standard', 'video', 'browser'] as const
+export type JobLane = typeof jobLanes[number]
 export const attemptOutcomes = ['succeeded', 'failed_retryable', 'failed_final', 'uncertain'] as const
 export type AttemptOutcome = typeof attemptOutcomes[number]
 
@@ -68,6 +71,8 @@ export const channels = pgTable('channels', {
   grantedScopes: text('granted_scopes').array(),
   // Permissions a platform refused on a send; cleared when the channel connects again.
   refusedScopes: text('refused_scopes').array().notNull().default(sql`'{}'::text[]`),
+  // When the daily token check last proved the grant works, or found it refused (src/token-check.ts).
+  tokenCheckedAt: timestamp('token_checked_at', { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, table => [
@@ -156,6 +161,8 @@ export const jobs = pgTable('jobs', {
   revision: integer('revision').notNull(),
   channelId: uuid('channel_id').notNull().references(() => channels.id),
   action: text('action').$type<'publish'>().notNull().default('publish'),
+  // Set at submit from the channel and media (src/jobs/service.ts).
+  lane: text('lane').$type<JobLane>().notNull().default('standard'),
   payload: jsonb('payload').$type<JobPayload>().notNull(),
   payloadHash: text('payload_hash').notNull(),
   publishAt: timestamp('publish_at', { withTimezone: true }).notNull(),
@@ -170,6 +177,7 @@ export const jobs = pgTable('jobs', {
 }, table => [
   check('jobs_state', oneOf('state', jobStates)),
   check('jobs_action', oneOf('action', ['publish'])),
+  check('jobs_lane', oneOf('lane', jobLanes)),
   check('jobs_revision', sql`revision > 0`),
   check('jobs_payload_size', sql`pg_column_size(payload) <= 262144`),
   unique('jobs_post_revision_channel').on(table.organizationId, table.postId, table.revision, table.channelId),

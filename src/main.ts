@@ -7,7 +7,7 @@ import type { PlatformAdapter } from './platforms/types.js'
 import { createDatabase } from './db/client.js'
 import { createEngineApp } from './http/app.js'
 import { Worker } from './jobs/worker.js'
-import { publicMediaKey } from './media.js'
+import { checkPublicMediaUrl, publicMediaKey } from './media.js'
 import { errorFields, log, registerLogSecrets } from './log.js'
 import { RunnerClient } from './platforms/browser/runner-client.js'
 import { BrowserAdapter } from './platforms/browser/adapter.js'
@@ -45,6 +45,7 @@ const context: EngineContext = {
   ...(config.publicMediaUrl ? { publicMedia: { baseUrl: config.publicMediaUrl, key: publicMediaKey(config.serviceToken), lifetimeMs: 60 * 60_000 } } : {}),
 }
 
+void checkPublicMediaUrl(config.publicMediaUrl)
 const worker = new Worker(context, config.worker)
 const server = createServer(toNodeListener(createEngineApp(context, config.serviceToken, { worker: () => worker.health() })))
 // Long enough for the largest video; only the dashboard API reaches this port.

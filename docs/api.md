@@ -794,7 +794,8 @@ lists the fields that moved. A picture URL whose signature alone changed is the
 same picture. `channel.status.changed`: `status` is `active`, `needs_reauth`
 or `disabled`; `previousStatus` is null for a channel just connected; `reason`
 is `connected`, `reconnected`, `logged_in`, `refresh_refused`,
-`publish_refused`, `reply_refused`, `message_refused` or `disabled`.
+`publish_refused`, `reply_refused`, `message_refused`, `token_check_refused`,
+`read_refused` or `disabled`.
 
 While a webhook takes `post.metrics.changed`, the channel's posts are read
 every 15 minutes in their first two days (otherwise hourly); while one takes
@@ -865,6 +866,15 @@ granted scopes. Instagram-login tokens last 60 days; the
 worker renews them ten days ahead, whether or not anything is published. When
 a platform refuses a renewal, the channel becomes `needs_reauth` and its due
 job fails; a renewal that fails in transit is retried with the job.
+
+Once a day the worker proves each connected OAuth channel's token with one
+cheap read from the shared read budget (Meta: the Page, Instagram account or
+WhatsApp number by ID; Instagram's login: `/me`; YouTube: `channels.list`,
+one unit), so a login revoked on the platform is found before a post is due:
+a refusal makes the channel `needs_reauth` (`token_check_refused`). The
+background reads do the same (`read_refused`) when the platform says the token
+is invalid (Meta OAuthException 190 or 102, Google 401). A missing permission
+for one action does not mark the channel.
 
 ## Browser accounts
 

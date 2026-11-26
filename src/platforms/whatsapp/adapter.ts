@@ -1,10 +1,10 @@
 import { z } from 'zod'
 import type { ChannelKind } from '../../db/schema.js'
 import { EngineError, invalid } from '../../errors.js'
-import { rateLimited } from '../meta/classify.js'
+import { guardRateLimit, rateLimited } from '../meta/classify.js'
 import { GraphClient, GraphError, type GraphCall, type GraphOptions } from '../meta/graph.js'
 import type {
-  ChannelLimits, ConnectedAccount, FindReplyOutcome, MediaDownloadInput, MediaDownloadResult, MessageRules, PlatformAdapter,
+  ChannelLimits, ChannelTarget, ConnectedAccount, FindReplyOutcome, MediaDownloadInput, MediaDownloadResult, MessageRules, PlatformAdapter,
   PublishOutcome, ReconcileOutcome, ResolvedProviderApp, SendMessageInput, SendMessageOutcome,
 } from '../types.js'
 import { bsuidPattern, waIdPattern, whatsappErrorCode } from './webhook.js'
@@ -202,6 +202,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async publish(): Promise<PublishOutcome> {
     return { kind: 'failed', retryable: false, code: 'unsupported_channel', detail: 'WhatsApp numbers take direct messages only' }
+  }
+
+  async checkCredential(app: ResolvedProviderApp | null, input: { channel: ChannelTarget, token: string }) {
+    if (!app) throw new Error('WhatsApp numbers need their provider app')
+    await guardRateLimit(() => this.graph.request('GET', `/${input.channel.externalId}`, { token: input.token, appSecret: app.secret, query: { fields: 'id' } }))
   }
 
   async reconcile(): Promise<ReconcileOutcome> {

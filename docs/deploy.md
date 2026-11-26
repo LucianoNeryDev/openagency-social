@@ -68,6 +68,7 @@ database readiness; `/readyz` also reports whether publishing keeps up
 | `RUNNER_URL`, `RUNNER_TOKEN` | Optional browser runner |
 | `ANTHROPIC_API_KEY`, `LIQUID_API_KEY` | Optional AI answers: drafting (Anthropic) and the decision (Liquid AI); redacted from logs |
 | `CONTROL_PLANE_EVENTS_URL` | Optional: the control plane's events route, `https:` or `http:` on loopback ([docs/api.md](api.md)) |
+| `WORKER_CONCURRENCY`, `WORKER_VIDEO_SLOTS`, `WORKER_BROWSER_SLOTS` | Optional, defaults 2, 1, 1: jobs at once for standard posts, video posts and browser jobs. Each lane has its own slots, so a few reels or a browser session cannot hold other posts past the one-hour lateness limit |
 | `SHUTDOWN_GRACE_MS` | Optional, default 25000: how long a stopping engine lets publishes finish (below) |
 
 ### Stopping and deploying

@@ -3,7 +3,7 @@ import type { ChannelKind } from '../../db/schema.js'
 import { invalid } from '../../errors.js'
 import { mediaFileBytes } from '../../media.js'
 import type {
-  AccountActivityInput, AccountActivityResult, AccountMetricsInput, AccountMetricsResult, ChannelLimits, ConnectedAccount, ConversationMessagesInput, ConversationsInput,
+  AccountActivityInput, AccountActivityResult, AccountMetricsInput, AccountMetricsResult, ChannelLimits, ChannelTarget, ConnectedAccount, ConversationMessagesInput, ConversationsInput,
   ConversationsResult, FindMessageInput, FindReplyInput, FindReplyOutcome, MediaInfo, MessageRules, MetricsInput, MetricsResult, PlatformAdapter, PlatformMessage,
   PublishInput, PublishOutcome, ReconcileInput, ReconcileOutcome, ReplyInput, ReplyOutcome, ReplyRules, ReplyTargetInput, ReplyTargetOutcome, ResolvedProviderApp,
   ResponsesInput, ResponsesResult, SendMessageInput, SendMessageOutcome,
@@ -196,6 +196,12 @@ export class MetaAdapter implements PlatformAdapter {
       return classify(error, true)
     }
     return { kind: 'published', externalId: created.id, url: `https://www.facebook.com/${created.id}` }
+  }
+
+  async checkCredential(app: ResolvedProviderApp | null, input: { channel: ChannelTarget, token: string, spendCall?: () => void }) {
+    if (!app) throw new Error('Meta channels need their provider app')
+    await guardRateLimit(() => this.graph.request('GET', `/${input.channel.externalId}`, { token: input.token, appSecret: app.secret,
+      query: { fields: 'id' }, ...spendAfterFirst(input.spendCall) }))
   }
 
   async reconcile(app: ResolvedProviderApp | null, input: ReconcileInput): Promise<ReconcileOutcome> {

@@ -14,7 +14,7 @@ import {
   type ConversationMessagesInput, type ConversationsInput, type ConversationsResult, type FindMessageInput, type FindReplyInput, type FindReplyOutcome,
   type MediaInfo, type MessageRules, type PlatformAdapter, type PlatformMessage, type MetricsInput, type MetricsResult, type PublishInput,
   type PublishOutcome, type ReconcileInput, type ReconcileOutcome, type ReplyInput, type ReplyOutcome, type ResolvedProviderApp, type ResponsesInput,
-  type ResponsesResult, type SendMessageInput, type SendMessageOutcome,
+  type ResponsesResult, type SendMessageInput, type SendMessageOutcome, type ChannelTarget,
 } from '../types.js'
 
 export const defaultInstagramScopes = ['instagram_business_basic', 'instagram_business_content_publish', 'instagram_business_manage_insights',
@@ -109,6 +109,10 @@ export class InstagramLoginAdapter implements PlatformAdapter {
 
   async publish(_app: ResolvedProviderApp | null, input: PublishInput): Promise<PublishOutcome> {
     return this.publisher.publish({ token: input.token }, input)
+  }
+
+  async checkCredential(_app: ResolvedProviderApp | null, input: { channel: ChannelTarget, token: string, spendCall?: () => void }) {
+    await guardRateLimit(() => this.graph.request('GET', '/me', { token: input.token, query: { fields: 'id' }, ...spendAfterFirst(input.spendCall) }))
   }
 
   async reconcile(_app: ResolvedProviderApp | null, input: ReconcileInput): Promise<ReconcileOutcome> {

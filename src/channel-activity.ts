@@ -5,8 +5,9 @@ import { channelActivity, jobs, type channels } from './db/schema.js'
 import { channelDriver } from './jobs/driver.js'
 import { errorFields, log } from './log.js'
 import { pauseForRateLimit } from './pause.js'
-import { RateLimited, type ChannelProfile, type PlatformPost } from './platforms/types.js'
+import { RateLimited, ReauthRequired, type ChannelProfile, type PlatformPost } from './platforms/types.js'
 import { emitWebhookEvents } from './webhooks.js'
+import { markNeedsReauth } from './token-check.js'
 
 /** Post IDs remembered per account: far more than one read returns, so a post never comes back as new. */
 export const maxSeenPosts = 200
@@ -94,6 +95,7 @@ export async function collectChannelActivity(context: EngineContext, channel: ty
       await pauseForRateLimit(context.db, channel, error, finished)
       return 'failed' as const
     }
+    if (error instanceof ReauthRequired) await markNeedsReauth(context, channel, 'read_refused')
     const values = { failureCount: (previous?.failureCount ?? 0) + 1, lastError: (error instanceof Error ? error.message : 'Activity read failed').slice(0, 500), updatedAt: finished }
     await context.db.insert(channelActivity).values({ ...base, ...values }).onConflictDoUpdate({ target: channelActivity.channelId, set: values })
     log('warn', 'channel activity read failed', { channelId: channel.id, failures: values.failureCount, ...errorFields(error) })
