@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A missing permission for one action no longer marks the whole channel as
+  needing a new login: Meta's codes 10 and 200-299 and YouTube's
+  `insufficientPermissions`, `forbidden` and `youtubeSignupRequired` fail the
+  job as `permission_missing`; only an invalid token (Meta 190 or 102,
+  Google 401 or `authError`) is `auth` with a new login.
 - Instagram's failed media download (subcodes 2207003, 2207020, 2207052, on
   the container request or its status) is retried as `media_download_failed`
   instead of failing for good. A post with media for Instagram or a browser

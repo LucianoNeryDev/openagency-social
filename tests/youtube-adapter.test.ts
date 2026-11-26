@@ -158,6 +158,10 @@ describe('YouTube publish', () => {
   it('retries on quota, asks for a login on 401, fails on a refusal', async () => {
     expect(await fakeGoogle([apiError(403, 'quotaExceeded')]).adapter.publish(app, input())).toMatchObject({ kind: 'failed', retryable: true, code: 'rate_limited' })
     expect(await fakeGoogle([apiError(401, 'authError')]).adapter.publish(app, input())).toMatchObject({ kind: 'failed', retryable: false, reauth: true })
+    // A missing permission for this one action is not a lost login.
+    const refused = await fakeGoogle([apiError(403, 'insufficientPermissions')]).adapter.publish(app, input())
+    expect(refused).toMatchObject({ kind: 'failed', retryable: false, code: 'permission_missing' })
+    expect(refused).not.toHaveProperty('reauth')
     expect(await fakeGoogle([apiError(400, 'invalidTitle')]).adapter.publish(app, input())).toMatchObject({ kind: 'failed', retryable: false, code: 'rejected' })
     expect(await fakeGoogle([opened, apiError(403, 'uploadLimitExceeded')]).adapter.publish(app, input())).toMatchObject({ kind: 'failed', retryable: false })
   })
