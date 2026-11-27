@@ -9,7 +9,7 @@ import type { Database } from '../src/db/client.js'
 import { channelActivity, webhookDeliveries, webhooks, type WebhookEventType, attempts, browserAccounts, channelCredentials, channelMetrics, channelMetricSamples, channels, events, jobs, media, postMetrics, postMetricSamples,
   postResponses, providerApps, responseChecks } from '../src/db/schema.js'
 import * as schema from '../src/db/schema.js'
-import { cancelJobs, listJobs, reconcileJob, resolveJob, restoreJobs, submitJobs, type SubmitInput } from '../src/jobs/service.js'
+import { cancelJobs, listJobs, payloadHash, reconcileJob, resolveJob, restoreJobs, submitJobs, type SubmitInput } from '../src/jobs/service.js'
 import { claimNext, executeClaimed, interrupted, lastStartMs, markSent, maxAttempts, requeueUnsent, settleAttempt, sweep, Worker } from '../src/jobs/worker.js'
 import { pauseForRateLimit } from '../src/pause.js'
 import { publishingHealth } from '../src/jobs/health.js'
@@ -204,6 +204,33 @@ describe.skipIf(!required)('engine on PostgreSQL 17', () => {
       expect(again.jobs.map(job => job.id).sort()).toEqual(first.jobs.map(job => job.id).sort())
       await expect(submitJobs(context, { ...input, content: 'Changed' })).rejects.toMatchObject({ code: 'revision_conflict' })
       await expect(submitJobs(context, { ...input, channels: input.channels.slice(0, 1) })).rejects.toMatchObject({ code: 'revision_conflict' })
+    })
+
+    it('publishes the content a channel was given instead of the post content', async () => {
+      const [a, b] = (await connect(['A', 'B'])).map(channel => channel.id)
+      const input = submission([a!, b!], { channels: [{ channelId: a!, settings: {} }, { channelId: b!, settings: {}, content: 'Solo per B' }] })
+      const created = await submitJobs(context, input)
+      const rows = await context.db.select().from(jobs).where(inArray(jobs.id, created.jobs.map(job => job.id)))
+      expect(rows.find(row => row.channelId === a)!.payload.content).toBe('Ciao Brescia')
+      expect(rows.find(row => row.channelId === b)!.payload.content).toBe('Solo per B')
+      // The check hash covers each channel's own text.
+      expect(rows.find(row => row.channelId === a)!.payloadHash)
+        .toBe(payloadHash({ content: 'Ciao Brescia', mediaIds: [], publishAt: input.publishAt, settings: {} }))
+      expect(rows.find(row => row.channelId === b)!.payloadHash)
+        .toBe(payloadHash({ content: 'Solo per B', mediaIds: [], publishAt: input.publishAt, settings: {} }))
+      expect((await submitJobs(context, input)).created).toBe(false)
+      await expect(submitJobs(context, { ...input, channels: [input.channels[0]!, { channelId: b!, settings: {}, content: 'Altro' }] }))
+        .rejects.toMatchObject({ code: 'revision_conflict' })
+      await expect(submitJobs(context, { ...input, channels: [input.channels[0]!, { channelId: b!, settings: {} }] }))
+        .rejects.toMatchObject({ code: 'revision_conflict' })
+      // Only the channel's own text is held to its limit.
+      await expect(submitJobs(context, submission([a!], { channels: [{ channelId: a!, settings: {}, content: 'x'.repeat(101) }] })))
+        .rejects.toMatchObject({ code: 'content_too_long', detail: { channelId: a, length: 101, maxLength: 100, lengthUnit: 'characters' } })
+      const long = submission([a!, b!], { content: 'x'.repeat(101), channels: [{ channelId: a!, settings: {}, content: 'corto' }, { channelId: b!, settings: {}, content: 'corto' }] })
+      expect((await submitJobs(context, long)).created).toBe(true)
+      advance(60 * 60_000)
+      for (let index = 0; index < 4; index++) await runDue()
+      expect(adapter.published.map(item => item.content).sort()).toEqual(['Ciao Brescia', 'Solo per B', 'corto', 'corto'])
     })
 
     it('returns the existing jobs for a resubmission even after publishAt has passed', async () => {

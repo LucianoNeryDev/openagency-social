@@ -35,9 +35,11 @@ export const browserRules: Record<BrowserPlatform, BrowserRules> = {
       if (media.length !== 1 || media[0]!.mimeType !== 'video/mp4') throw invalid('unsupported_media', 'TikTok posts need exactly one MP4 video')
     },
   },
-  // Free accounts: 280 characters. X counts links as 23 and some characters
-  // as two, so a post near the limit may still be refused before posting.
-  x: { platform: 'x', label: 'X', kinds: ['x_account'], limits: { maxLength: 280, maxMedia: 4 }, settings: none, media: imagesOrOneVideo('X', 4) },
+  // Free accounts: 280, X's weighted length (every link 23, emoji and CJK 2).
+  x: {
+    platform: 'x', label: 'X', kinds: ['x_account'], limits: { maxLength: 280, maxMedia: 4, lengthUnit: 'x_weighted' }, settings: none,
+    media: imagesOrOneVideo('X', 4),
+  },
   linkedin: {
     platform: 'linkedin', label: 'LinkedIn', kinds: ['linkedin_profile', 'linkedin_page'], limits: { maxLength: 3_000, maxMedia: 9 },
     settings: none, media: imagesOrOneVideo('LinkedIn', 9),
@@ -50,7 +52,7 @@ export const browserRules: Record<BrowserPlatform, BrowserRules> = {
   },
   // The post text is the Pin's description.
   pinterest: {
-    platform: 'pinterest', label: 'Pinterest', kinds: ['pinterest_account'], limits: { maxLength: 500, maxMedia: 1 },
+    platform: 'pinterest', label: 'Pinterest', kinds: ['pinterest_account'], limits: { maxLength: 500, maxMedia: 1, titleMaxLength: 100 },
     settings: z.strictObject({
       board: z.string().trim().min(1).max(180),
       title: z.string().trim().max(100).optional(),
@@ -60,7 +62,7 @@ export const browserRules: Record<BrowserPlatform, BrowserRules> = {
   },
   // The post text is the body; `subreddit` is a name without `r/`, or `u_<username>` for the account's own profile.
   reddit: {
-    platform: 'reddit', label: 'Reddit', kinds: ['reddit_account'], limits: { maxLength: 40_000, maxMedia: 20 },
+    platform: 'reddit', label: 'Reddit', kinds: ['reddit_account'], limits: { maxLength: 40_000, maxMedia: 20, titleMaxLength: 300 },
     settings: z.strictObject({
       subreddit: z.string().regex(/^(u_)?[A-Za-z0-9_]{2,21}$/),
       title: z.string().trim().min(1).max(300),

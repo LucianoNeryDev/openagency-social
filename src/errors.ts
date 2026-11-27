@@ -8,4 +8,4 @@ export class EngineError extends Error {
 
 export const notFound = (what: string) => new EngineError(404, 'not_found', `${what} not found`)
 export const conflict = (code: string, message: string, detail?: Record<string, unknown>) => new EngineError(409, code, message, detail)
-export const invalid = (code: string, message: string) => new EngineError(400, code, message)
+export const invalid = (code: string, message: string, detail?: Record<string, unknown>) => new EngineError(400, code, message, detail)

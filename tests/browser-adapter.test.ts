@@ -90,7 +90,7 @@ describe('other browser platforms', () => {
 
   it('takes images or one video on X and LinkedIn, and no settings', () => {
     const x = rulesFor('x')
-    expect(x.limits()).toEqual({ maxLength: 280, maxMedia: 4 })
+    expect(x.limits()).toEqual({ maxLength: 280, maxMedia: 4, lengthUnit: 'x_weighted' })
     expect(() => x.validateSettings('x_account', {}, [])).not.toThrow()
     expect(() => x.validateSettings('x_account', {}, [image, image, image, image])).not.toThrow()
     expect(() => x.validateSettings('x_account', {}, [video, image])).toThrow('one video')
