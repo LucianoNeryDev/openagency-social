@@ -93,6 +93,10 @@ makes no approval decisions.
 - **Risk** — how risky answering an item without a person would be: a
   **risk level** (`low`, `medium`, `high`, the model's choice) and a **risk
   score** (0 to 100). `auto` needs a score below the **risk threshold**.
+- **Learned answer** — an answer a person approved and the platform
+  confirmed, kept per channel and kind with the person's redacted text. A
+  later item with the same or a similar text is decided from it
+  (`learned_answer`), still behind the risk threshold and the guards.
 - **Engine draft** — the answer the engine wrote for a decided item, with the
   digest its unedited submission would carry. A newer draft for the same
   conversation **supersedes** older ones. Drafts reach the dashboard through

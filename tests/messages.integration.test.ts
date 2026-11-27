@@ -115,7 +115,7 @@ describe.skipIf(!required)('direct messages on PostgreSQL 17', { timeout: 60_000
   afterAll(async () => { await fixture?.cleanup() }, 30_000)
 
   beforeEach(async () => {
-    await fixture.migrator.query('truncate inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
+    await fixture.migrator.query('truncate learned_answers, inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
     now = new Date('2030-01-01T10:00:00Z')
     org = `org-${randomUUID()}`
     meta = new FakeMessenger(() => now)

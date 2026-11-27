@@ -107,3 +107,48 @@ person.
   the tenant's current one when that is lower: a later, stricter threshold
   applies at once, a looser one never lifts the stored one. Decisions stored before the change have no
   risk and are refused.
+
+## Amendment: learned answers
+
+Added 2026-11-26. The control plane wants answers a person approved to be
+reused: when the same or a similar message arrives again, it should go out
+without a person, provided its risk is low.
+
+- **Learn at the confirmed send, from people only.** A reply or message
+  learns when it settles as `sent` and was not an automatic send. The
+  engine's own record of the send names the answered item (the DM's newest
+  inbound message before the approval, or the comment it replies to), so the
+  control plane needs no new field. A send that follows the brand's earlier
+  answer to the same item is a follow-up and teaches nothing.
+- **One learned answer per channel, kind and text.** The text is redacted
+  (addresses, links, phone-like numbers) and normalised; its SHA-256
+  fingerprint is the key, and the newest approval wins. Scoping by channel
+  keeps one brand voice per account and never lets a comment answer become
+  a DM answer.
+- **Local, deterministic matching.** No embeddings service: exact
+  fingerprint first, else the Jaccard similarity of character trigrams
+  against the scope's 500 newest approvals, at or above
+  `learningSimilarity` (default 0.85, at least 0.7), with both texts of three
+  words or more and the same digit-bearing words. Trigrams tolerate typos
+  and greetings; the digit rule keeps "2 people" from answering "4 people".
+- **A case-like path that stays behind the gate.** A match decides like an
+  `always` case (`learned_answer`), after the cases (`never` and `always`
+  win): only the risk is asked, and `auto` still needs a risk strictly
+  below the threshold; unknown risk never clears. The decision keeps the
+  learned answer's ID and the similarity for audit.
+- **Reuse the words only when safe.** The same text reuses the approved reply
+  verbatim, unless it names the person it first answered; otherwise the
+  drafting model adapts it as the primary example and adds nothing else.
+- **The guard checks the learned answer too.** `guard_decision` refuses an
+  automatic send of a learned draft when learning is now off, or the answer
+  was forgotten, approved again or edited after the draft.
+- **Retention.** The person's text is third-party personal data: kept
+  redacted, without the author, as long as the item it came from (180 days),
+  and gone with a disabled channel. With `learning` off nothing is learned
+  or matched (data minimisation); what was learned stays until it expires or
+  a person forgets it.
+
+Rejected: embeddings (a new processor for third-party text, and not
+deterministic); learning from automatic sends (the engine would teach itself
+its own mistakes); matching across channels (a brand's voice and facts
+differ per account).

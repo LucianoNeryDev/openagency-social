@@ -97,7 +97,7 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
   afterAll(async () => { await fixture?.cleanup() }, 30_000)
 
   beforeEach(async () => {
-    await fixture.migrator.query('truncate inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
+    await fixture.migrator.query('truncate learned_answers, inbound_drafts, control_events, answering_settings, outgoing_message_cancellations, outgoing_messages, direct_messages, conversations, conversation_checks, channel_activity, webhook_deliveries, webhooks, replies, reply_cancellations, post_metric_samples, channel_metric_samples, channel_metrics, post_responses, response_checks, post_metrics, attempts, jobs, events, media_chunks, media, oauth_states, channel_credentials, channels, publishing_controls, browser_accounts')
     now = new Date('2030-01-01T10:00:00Z')
     org = `org-${randomUUID()}`
     decision = new FakeDecision()
@@ -111,7 +111,7 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
 
   const baseSettings = (overrides: Partial<AnsweringSettings> = {}): AnsweringSettings => ({ enabled: true, drafts: true, kinds: { messages: true, comments: true },
     decisionModel: 'd1.1', decisionPrompt: 'Answer shipping questions.', decisionThreshold: 0.9, noneThreshold: 0.8, riskThreshold: 30, replyModel: 'haiku',
-    voice: 'Friendly.', replyContext: '', delaySeconds: 120, cases: [], ...overrides })
+    voice: 'Friendly.', replyContext: '', delaySeconds: 120, cases: [], learning: true, learningSimilarity: 0.85, ...overrides })
   const put = (overrides: Partial<AnsweringSettings> = {}, organizationId = org) =>
     putAnswering(context, organizationId, { version: ++version, settings: baseSettings(overrides), context: [{ id: 'e1', topic: 'shipping', body: 'Three days.' }] })
 
@@ -227,7 +227,7 @@ describe.skipIf(!required)('AI answers on PostgreSQL 17', { timeout: 60_000 }, (
         inboundExternalId: first!.inboundExternalId,
         decision: { outcome: 'review', reason: 'below_threshold', model: 'd1.1-test', probabilities: { full: 0.2, draft: 0.7, none: 0.1 }, confidence: 0.8,
           risk: { level: 'low', score: 7, probabilities: { low: 0.88, medium: 0.1, high: 0.02 }, confidence: 0.81 }, riskThreshold: 30,
-          caseId: null, decisionThreshold: 0.9, noneThreshold: 0.8, cost: 0.0001, errorCode: null, settingsVersion: version },
+          caseId: null, learnedAnswerId: null, learnedSimilarity: null, decisionThreshold: 0.9, noneThreshold: 0.8, cost: 0.0001, errorCode: null, settingsVersion: version },
         draft: { text: 'Reply: Do you ship to Spain?', digest: first!.draftDigest, model: 'claude-haiku-5-5', language: 'en', flags: [] },
         draftErrorCode: null, superseded: false, supersededBy: null, supersedes: [], createdAt: now.toISOString() }])
       const ack = await fetch(`${base}/v1/drafts/outbox/ack`, { method: 'POST', headers, body: JSON.stringify({ ids: [first!.id, randomUUID()] }) })

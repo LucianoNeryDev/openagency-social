@@ -11,6 +11,8 @@ import { messageDigest, replyDigest } from '../digests.js'
 import { decide, type Decision, type DecisionItem } from './decision.js'
 import { lockAnswering, storedSettings } from './settings.js'
 import { DraftError, draftFits, draftFlags, draftLimits, tooLongFlag, type DraftInput, type DraftOutput, type HistoryMessage, type ThreadItem } from './drafting.js'
+import { findLearnedAnswer, recordLearnedUse, type LearnedCandidate } from './learning.js'
+import type { LearnedMatch } from './learned-match.js'
 
 // The answering step: decide, then draft, for inbound DMs and comments the
 // readers stored. It runs in its own worker pass, after the readers committed,
@@ -181,10 +183,28 @@ export function draftObjection(output: Pick<DraftOutput, 'reply' | 'needsReply' 
   return null
 }
 
+/** What the engine reports as the drafting model of a draft that reuses a learned answer word for word. */
+export const learnedDraftModel = 'learned_answer'
+
 /**
- * Decides an item, then drafts it unless the decision is `none`. Without a
- * drafting model there is no draft. A cleared (`auto`) item goes to a person
- * when the draft objects (`no_draft`, `flagged`, `draft_too_long`).
+ * The draft of an item that is the same as a learned one: the reply a person
+ * approved, word for word. Null when it may not be reused as it is (it names
+ * the person it first answered): the drafting model then adapts it.
+ */
+export function learnedDraft(match: LearnedMatch<LearnedCandidate>): DraftOutput | null {
+  if (!match.exact || match.candidate.addressesPerson) return null
+  return { needsReply: true, reply: match.candidate.replyText, language: match.candidate.language ?? '', flags: [],
+    summary: 'The same message was answered before: this is the reply a person approved then.' }
+}
+
+/**
+ * Decides an item, then drafts it unless the decision is `none`. With the
+ * tenant's learning on, the item is first matched against its channel's
+ * learned answers: the decision takes the best match (`learned_answer`), and
+ * the draft reuses its reply for the same text or adapts it for a similar
+ * one. Without a drafting model there is no draft, except a reused one. A
+ * cleared (`auto`) item goes to a person when the draft objects (`no_draft`,
+ * `flagged`, `draft_too_long`).
  */
 async function decideAndDraft(context: EngineContext, candidate: Candidate): Promise<Drafted> {
   const { settings, context: entries } = candidate.tenant
@@ -195,14 +215,28 @@ async function decideAndDraft(context: EngineContext, candidate: Candidate): Pro
     : { kind: 'comment', channel: { id: candidate.channel.id, name: candidate.channel.name, platform: candidate.channel.platform },
       author: { name: candidate.response.authorName, handle: candidate.response.authorHandle }, text: candidate.response.text, attachments: [],
       post: candidate.job.payload.content }
-  let decision = await decide({ settings, context: entries, item, flagged: item.attachments.length > 0, model: context.decisionModel })
+  const learned = settings.learning
+    ? await findLearnedAnswer(context.db, { channelId: candidate.channel.id, kind: candidate.kind }, item.text, settings.learningSimilarity) : null
+  let decision = await decide({ settings, context: entries, item, flagged: item.attachments.length > 0, model: context.decisionModel,
+    learned: learned && { id: learned.candidate.id, similarity: learned.similarity } })
   if (decision.outcome === 'none') return { decision, draft: null, flags: [], draftErrorCode: null }
+  const match = learned && decision.learnedAnswerId === learned.candidate.id ? learned : null
+  const reused = match && learnedDraft(match)
+  if (reused) {
+    // Still held to what any draft is: it fits the channel, else a person sees it.
+    const maxLength = channelMaxLength(context, candidate.channel, candidate.kind)
+    const objection = draftObjection(reused, maxLength)
+    if (decision.outcome === 'auto' && objection) decision = { ...decision, outcome: 'review', reason: objection }
+    const flags = draftFits(maxLength, reused.reply!) ? [] : [tooLongFlag]
+    return { decision, draft: { text: reused.reply!, model: learnedDraftModel, output: reused }, flags, draftErrorCode: null }
+  }
   if (!context.draftModel) {
     return { decision: decision.outcome === 'auto' ? { ...decision, outcome: 'review', reason: 'no_draft' } : decision, draft: null, flags: [], draftErrorCode: null }
   }
   const input = await draftInputFor(context, candidate.kind === 'message'
     ? { kind: 'message', channel: candidate.channel, conversationId: candidate.conversation.id, upTo: candidate.message.sentAt }
     : { kind: 'comment', channel: candidate.channel, response: candidate.response, job: candidate.job }, settings, entries, decision.outcome === 'auto')
+  if (match) input.learned = { inbound: match.candidate.inboundText, reply: match.candidate.replyText }
   try {
     const result = await context.draftModel.draft(input, settings.replyModel)
     const text = result.output.reply
@@ -239,13 +273,15 @@ async function storeDraft(context: EngineContext, candidate: Candidate, drafted:
     const [created] = await transaction.insert(inboundDrafts).values({
       organizationId: candidate.tenant.organizationId, channelId: candidate.channel.id, kind: candidate.kind, ...target,
       outcome: decision.outcome, reason: decision.reason, decisionModel: decision.model, probabilities: decision.probabilities,
-      confidence: decision.confidence, caseId: decision.caseId, decisionThreshold: decision.decisionThreshold, noneThreshold: decision.noneThreshold,
+      confidence: decision.confidence, caseId: decision.caseId, learnedAnswerId: decision.learnedAnswerId, learnedSimilarity: decision.learnedSimilarity,
+      decisionThreshold: decision.decisionThreshold, noneThreshold: decision.noneThreshold,
       riskLevel: decision.risk?.level ?? null, riskScore: decision.risk?.score ?? null, riskProbabilities: decision.risk?.probabilities ?? null,
       riskConfidence: decision.risk?.confidence ?? null, riskThreshold: decision.riskThreshold, cost: decision.cost, errorCode: decision.errorCode, draftText: draft?.text ?? null, draftDigest: digest, draftModel: draft?.model ?? null,
       draftLanguage: draft?.output.language.slice(0, 16) ?? null, draftFlags: drafted.flags, draftErrorCode: drafted.draftErrorCode,
       settingsVersion: candidate.tenant.version, outboxPending: true, outboxAt: now, createdAt: now,
     }).onConflictDoNothing().returning({ id: inboundDrafts.id })
     if (!created) return null
+    if (decision.learnedAnswerId) await recordLearnedUse(transaction, decision.learnedAnswerId, now)
     if (candidate.kind === 'message') {
       const taken = sql`exists (select 1 from ${outgoingMessages} where ${outgoingMessages.draftId} = ${inboundDrafts.id})`
       await transaction.update(inboundDrafts).set({ supersededBy: created.id, supersededAt: now, outboxPending: true, outboxAt: now })
@@ -255,7 +291,7 @@ async function storeDraft(context: EngineContext, candidate: Candidate, drafted:
     await recordEvent(transaction, { organizationId: candidate.tenant.organizationId, kind: 'draft.created', channelId: candidate.channel.id,
       detail: { draftId: created.id, kind: candidate.kind, outcome: decision.outcome, reason: decision.reason, model: decision.model,
         probabilities: decision.probabilities, confidence: decision.confidence, risk: decision.risk, riskThreshold: decision.riskThreshold,
-        caseId: decision.caseId, cost: decision.cost,
+        caseId: decision.caseId, learnedAnswerId: decision.learnedAnswerId, learnedSimilarity: decision.learnedSimilarity, cost: decision.cost,
         errorCode: decision.errorCode, drafted: Boolean(draft), draftModel: draft?.model ?? null, draftErrorCode: drafted.draftErrorCode,
         flags: drafted.flags, settingsVersion: candidate.tenant.version } })
     await queueControlEvent(transaction, 'drafts.available', candidate.tenant.organizationId, now)

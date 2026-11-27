@@ -6,6 +6,7 @@ import { inboundDrafts, outgoingMessages, postResponses, replies, type DraftKind
 import { riskClears, type RiskAssessment } from './decision.js'
 import { conflict } from '../errors.js'
 import { lockAnswering, minAutoDelaySeconds, readAnswering } from './settings.js'
+import { learnedAnswerUnchanged } from './learning.js'
 
 // The dashboard's view of engine drafts: the outbox it pulls, and the
 // guards an automatic send of a draft must pass. The guards trust the
@@ -36,6 +37,9 @@ export interface DraftView {
     /** Null for items decided before risk existed. */
     riskThreshold: number | null
     caseId: string | null
+    /** The learned answer behind a `learned_answer` decision (also kept when the risk or a flag sent it to a person), and the item's similarity to it. */
+    learnedAnswerId: string | null
+    learnedSimilarity: number | null
     decisionThreshold: number
     noneThreshold: number
     cost: number | null
@@ -62,7 +66,8 @@ export function draftView(row: DraftRow, extra: { jobId: string | null, supersed
     id: row.id, organizationId: row.organizationId, kind: row.kind, channelId: row.channelId, conversationId: row.conversationId,
     responseId: row.responseId, jobId: extra.jobId, inboundExternalId: row.inboundExternalId,
     decision: { outcome: row.outcome, reason: row.reason, model: row.decisionModel, probabilities: row.probabilities, confidence: row.confidence,
-      risk: riskOf(row), riskThreshold: row.riskThreshold, caseId: row.caseId, decisionThreshold: row.decisionThreshold, noneThreshold: row.noneThreshold, cost: row.cost, errorCode: row.errorCode,
+      risk: riskOf(row), riskThreshold: row.riskThreshold, caseId: row.caseId, learnedAnswerId: row.learnedAnswerId, learnedSimilarity: row.learnedSimilarity,
+      decisionThreshold: row.decisionThreshold, noneThreshold: row.noneThreshold, cost: row.cost, errorCode: row.errorCode,
       settingsVersion: row.settingsVersion },
     draft: row.draftText && row.draftDigest
       ? { text: row.draftText, digest: row.draftDigest, model: row.draftModel, language: row.draftLanguage, flags: row.draftFlags } : null,
@@ -116,7 +121,8 @@ export type AutomationTarget =
  * decision is `auto` with a stored risk score strictly below the risk
  * threshold stored with it and below the tenant's current one; the tenant's current settings have automatic sending
  * and the kind on; the submission is revision 1 with the draft's digest
- * (unedited); the draft is not superseded; `sendAt` is at least the delay
+ * (unedited); a draft from a learned answer has learning on and the answer
+ * unchanged since; the draft is not superseded; `sendAt` is at least the delay
  * (never under 60 s) after the draft; and no automatic send used it yet.
  * Runs in the submission's transaction, under the settings lock.
  */
@@ -139,6 +145,10 @@ export async function checkAutomation(executor: Executor, organizationId: string
   // The stored risk, against the threshold stored with it (or today's, when lower): a decision without both never goes out unseen.
   const threshold = draft.riskThreshold === null ? null : Math.min(draft.riskThreshold, settings?.riskThreshold ?? draft.riskThreshold)
   if (!riskClears(draft.riskScore, threshold)) throw refuse('guard_decision', 'The item\'s stored risk does not allow an automatic answer')
+  // A learned answer clears only while learning is on and the answer stands as it was when the draft was made from it.
+  if (draft.learnedAnswerId && (!settings?.learning || !await learnedAnswerUnchanged(executor, draft.learnedAnswerId, draft.createdAt))) {
+    throw refuse('guard_decision', 'The learned answer behind this draft was changed or forgotten, or learning is off')
+  }
   if (!settings?.enabled || !settings.drafts || !settings.kinds[input.kind === 'message' ? 'messages' : 'comments']) {
     throw refuse('guard_settings', 'Automatic answering is off for this tenant or this kind')
   }

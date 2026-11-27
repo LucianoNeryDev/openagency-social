@@ -27,6 +27,8 @@ import { outgoingMessageStates } from '../db/schema.js'
 import { answeringPutSchema, getAnswering, putAnswering } from '../answering/settings.js'
 import { ackDraftOutbox, listDraftOutbox } from '../answering/drafts.js'
 import { reviseDraft, reviseSchema } from '../answering/revise.js'
+import { deleteLearnedAnswer, deleteLearnedAnswers, learnedListQuery, learnedScopeQuery, learnedUpdateSchema, listLearnedAnswers,
+  updateLearnedAnswer } from '../answering/learning.js'
 import { checkBrowserLogin, listBrowserAccounts, startBrowserLogin } from '../vault.js'
 import { createWebhook, deleteWebhook, listDeliveries, listWebhooks, redeliver, rotateWebhookSecret, testWebhook, updateWebhook, webhookCreateSchema,
   webhookUpdateSchema } from '../webhooks.js'
@@ -258,6 +260,15 @@ export function createEngineApp(context: EngineContext, serviceToken: string, op
   router.post('/v1/tenants/:org/drafts/revise', authed(async event => reviseDraft(context, organizationId.parse(getRouterParam(event, 'org')),
     reviseSchema.parse(await readJson(event)))))
   // Webhooks: the tenant's endpoints, told of published posts, moving numbers and new comments.
+  // Learned answers: what a person approved, reused for the same or similar items (ADR 0004).
+  router.get('/v1/tenants/:org/learned-answers', authed(async event => listLearnedAnswers(context, organizationId.parse(getRouterParam(event, 'org')),
+    learnedListQuery.parse(getQuery(event)))))
+  router.delete('/v1/tenants/:org/learned-answers', authed(async event => deleteLearnedAnswers(context, organizationId.parse(getRouterParam(event, 'org')),
+    learnedScopeQuery.parse(getQuery(event)))))
+  router.patch('/v1/tenants/:org/learned-answers/:id', authed(async event => updateLearnedAnswer(context, organizationId.parse(getRouterParam(event, 'org')),
+    z.uuid().parse(getRouterParam(event, 'id')), learnedUpdateSchema.parse(await readJson(event)))))
+  router.delete('/v1/tenants/:org/learned-answers/:id', authed(async event => deleteLearnedAnswer(context, organizationId.parse(getRouterParam(event, 'org')),
+    z.uuid().parse(getRouterParam(event, 'id')))))
   router.get('/v1/tenants/:org/webhooks', authed(async event => ({ webhooks: await listWebhooks(context, organizationId.parse(getRouterParam(event, 'org'))) })))
   router.post('/v1/tenants/:org/webhooks', authed(async event => {
     const org = organizationId.parse(getRouterParam(event, 'org'))
