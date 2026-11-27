@@ -9,6 +9,7 @@ import {
 import { conflict, EngineError, invalid, notFound } from './errors.js'
 import type { ChannelTarget, ConnectedAccount } from './platforms/types.js'
 import { messageAvailability, replyAvailability, type MessageAvailability, type ReplyAvailability } from './reply-availability.js'
+import type { LengthUnit } from './text-length.js'
 import { forgetChannelConversations, forgetChannelResponses } from './retention.js'
 import { changeChannelStatus, emitChannelStatus } from './webhooks.js'
 
@@ -21,8 +22,12 @@ export interface ChannelView {
   name: string
   externalId: string
   status: string
+  /** The longest post text, counted in `lengthUnit`. */
   maxLength: number
   maxMedia: number
+  lengthUnit: LengthUnit
+  /** The longest `title` setting, where the kind takes one. */
+  titleMaxLength?: number
   /** Whether people can reply to comments on it, and why not. */
   replies: ReplyAvailability
   /** Whether direct messages can be sent on it, and why not. */
@@ -154,6 +159,7 @@ export async function listChannels(context: EngineContext, organizationId: strin
   return rows.map(row => {
     const limits = adapterFor(context, row.platform).limits(row.kind)
     return { id: row.id, platform: row.platform, kind: row.kind, name: row.name, externalId: row.externalId, status: row.status, ...limits,
+      lengthUnit: limits.lengthUnit ?? 'characters',
       replies: replyAvailability(context, row), messages: messageAvailability(context, row) }
   })
 }

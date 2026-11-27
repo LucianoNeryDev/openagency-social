@@ -10,6 +10,7 @@ import { conflict, invalid, notFound } from '../errors.js'
 import { loadMediaInfo } from '../media.js'
 import type { Executor } from '../db/client.js'
 import { lastStartMs } from './worker.js'
+import { textLength } from '../text-length.js'
 
 export const minimumLeadMs = 5 * 60_000
 /** Reconcile may only conclude "not published" after this long. */
@@ -24,7 +25,13 @@ export interface SubmitInput {
   publishAt: string
   content: string
   mediaIds: string[]
-  channels: Array<{ channelId: string, settings: Record<string, unknown> }>
+  /** `content` replaces the post's content on that channel only. */
+  channels: Array<{ channelId: string, settings: Record<string, unknown>, content?: string | undefined }>
+}
+
+/** The text a channel publishes: its own caption, or the post's. */
+export function channelContent(input: Pick<SubmitInput, 'content'>, target: SubmitInput['channels'][number]) {
+  return target.content ?? input.content
 }
 
 type JobRow = typeof jobs.$inferSelect
@@ -44,7 +51,7 @@ export async function submitJobs(context: EngineContext, input: SubmitInput) {
   if (new Set(channelIds).size !== channelIds.length) throw invalid('duplicate_channel', 'Each channel may appear once')
   return context.db.transaction(async transaction => {
     await lockControls(transaction, input.organizationId)
-    const hashes = new Map(input.channels.map(channel => [channel.channelId, payloadHash({ content: input.content, mediaIds: input.mediaIds, publishAt: input.publishAt, settings: channel.settings })]))
+    const hashes = new Map(input.channels.map(channel => [channel.channelId, payloadHash({ content: channelContent(input, channel), mediaIds: input.mediaIds, publishAt: input.publishAt, settings: channel.settings })]))
     const existing = await transaction.select().from(jobs)
       .where(and(eq(jobs.organizationId, input.organizationId), eq(jobs.postId, input.postId), eq(jobs.revision, input.revision)))
     if (existing.length) {
@@ -70,9 +77,14 @@ export async function submitJobs(context: EngineContext, input: SubmitInput) {
         throw invalid('public_media_unavailable', `${channel.name} needs PUBLIC_MEDIA_URL to post media`)
       }
       const adapter = adapterFor(context, channel.platform)
-      adapter.validateSettings(channel.kind, target.settings, mediaInfo, input.content)
+      const content = channelContent(input, target)
+      adapter.validateSettings(channel.kind, target.settings, mediaInfo, content)
       const limits = adapter.limits(channel.kind)
-      if (input.content.length > limits.maxLength) throw invalid('content_too_long', `Content is too long for ${channel.name}`)
+      const unit = limits.lengthUnit ?? 'characters'
+      const length = textLength(content, unit)
+      if (length > limits.maxLength) {
+        throw invalid('content_too_long', `Content is too long for ${channel.name}`, { channelId: channel.id, length, maxLength: limits.maxLength, lengthUnit: unit })
+      }
       if (input.mediaIds.length > limits.maxMedia) throw invalid('too_many_media', `Too many images for ${channel.name}`)
     }
     // Counted under the tenant lock, so concurrent submissions cannot both pass.
@@ -87,14 +99,15 @@ export async function submitJobs(context: EngineContext, input: SubmitInput) {
     const video = mediaInfo.some(file => file.mimeType.startsWith('video/'))
     const created = await transaction.insert(jobs).values(input.channels.map(target => {
       const channel = rows.find(row => row.id === target.channelId)!
-      const payload: JobPayload = { content: input.content, mediaIds: input.mediaIds, settings: target.settings,
+      const payload: JobPayload = { content: channelContent(input, target), mediaIds: input.mediaIds, settings: target.settings,
         approvedByUserId: input.approvedByUserId, approvedAt: input.approvedAt }
       return { organizationId: input.organizationId, postId: input.postId, revision: input.revision, channelId: target.channelId,
         lane: jobLane(channel, video), payload, payloadHash: hashes.get(target.channelId)!, publishAt, notBefore: publishAt }
     })).returning()
     for (const job of created) {
       await recordEvent(transaction, { organizationId: input.organizationId, kind: 'job.queued', jobId: job.id, channelId: job.channelId,
-        detail: { postId: job.postId, revision: job.revision, approvedByUserId: input.approvedByUserId } })
+        detail: { postId: job.postId, revision: job.revision, approvedByUserId: input.approvedByUserId,
+          ...(input.channels.find(target => target.channelId === job.channelId)?.content === undefined ? {} : { ownContent: true }) } })
     }
     return { jobs: created.map(jobView), created: true }
   })

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- A caption per channel. Each entry of `POST /v1/jobs`'s `channels` may
+  carry its own `content`, which replaces the post's on that channel; the
+  job stores it and its check hash covers it (no migration: the job's
+  payload already holds its text). Without it nothing changes.
+- Post text is counted the way each platform counts it: X by its weighted
+  length (every link 23, emoji and CJK 2), YouTube descriptions in UTF-8
+  bytes, other kinds in code points (previously UTF-16 units, so emoji
+  counted double). YouTube titles count code points too. The channel list
+  gives each channel's `lengthUnit`, and `titleMaxLength` for YouTube (100),
+  Pinterest (100) and Reddit (300); `content_too_long` names the channel,
+  the length, the limit and the unit in `detail`.
 - Learned answers. A reply or DM a person approved (not an automatic send),
   once the platform confirms it, is learned per channel and kind: the
   person's text, redacted (no addresses, links or phone numbers) and

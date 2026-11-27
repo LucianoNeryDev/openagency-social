@@ -120,6 +120,10 @@ describe('YouTube validation', () => {
     expect(() => adapter.validateSettings('youtube_channel', settings, [info('video/mp4')], 'use <html>')).toThrow('5,000')
     expect(() => adapter.validateSettings('youtube_channel', settings, [info('video/mp4')], 'é'.repeat(2_501))).toThrow('5,000')
     expect(() => adapter.validateSettings('facebook_page', settings, [info('video/mp4')])).toThrow('Not a YouTube')
+    // The title counts characters: 100 emoji fit, 101 letters do not.
+    expect(() => adapter.validateSettings('youtube_channel', { title: '🎮'.repeat(100) }, [info('video/mp4')])).not.toThrow()
+    expect(() => adapter.validateSettings('youtube_channel', { title: 'a'.repeat(101) }, [info('video/mp4')])).toThrow('title')
+    expect(adapter.limits()).toEqual({ maxLength: 5_000, maxMedia: 2, lengthUnit: 'bytes', titleMaxLength: 100 })
   })
 })
 

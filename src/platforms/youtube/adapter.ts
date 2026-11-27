@@ -39,7 +39,7 @@ export const youtubeVideoRules: VideoRules = {
 const plain = (value: string) => !/[<>]/.test(value)
 
 export const youtubeSettingsSchema = z.strictObject({
-  title: z.string().trim().min(1).max(100).refine(plain, 'no angle brackets'),
+  title: z.string().trim().min(1).max(400).refine(title => Array.from(title).length <= 100, 'title too long').refine(plain, 'no angle brackets'),
   privacy: z.enum(['public', 'unlisted', 'private']).default('public'),
   madeForKids: z.boolean().default(false),
   tags: z.array(z.string().trim().min(1).max(100).refine(plain)).max(30).refine(tags => tags.join(',').length <= 500, 'tags too long').default([]),
@@ -171,8 +171,8 @@ export class YoutubeAdapter implements PlatformAdapter {
   }
 
   limits(): ChannelLimits {
-    // The description; a thumbnail may follow the video.
-    return { maxLength: 5_000, maxMedia: 2 }
+    // The description, in UTF-8 bytes as the Data API counts it; a thumbnail may follow the video.
+    return { maxLength: 5_000, maxMedia: 2, lengthUnit: 'bytes', titleMaxLength: 100 }
   }
 
   validateSettings(kind: ChannelKind, settings: Record<string, unknown>, media: MediaInfo[], content?: string) {

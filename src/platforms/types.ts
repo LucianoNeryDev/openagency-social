@@ -1,3 +1,4 @@
+import type { LengthUnit } from '../text-length.js'
 import type {
   AttemptUpload, ChannelKind, ChannelMetricName, ChannelMetricValues, MessageAttachment, MessagingPlatform, MetricName, MetricValues, Platform, ProviderAppSettings,
 } from '../db/schema.js'
@@ -276,8 +277,13 @@ export type ResponsesResult =
   | { kind: 'unavailable', reason: string }
 
 export interface ChannelLimits {
+  /** The longest post text, counted in `lengthUnit`. */
   maxLength: number
   maxMedia: number
+  /** How `maxLength` counts (src/text-length.ts); `characters` when absent. */
+  lengthUnit?: LengthUnit
+  /** The longest `title` setting, in characters, where the channel kind takes one. */
+  titleMaxLength?: number
 }
 
 /** What a reply on a channel kind needs: the permission the grant must hold, and the longest text. */
