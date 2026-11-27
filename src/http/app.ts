@@ -49,7 +49,8 @@ export const submitSchema = z.strictObject({
   publishAt: z.iso.datetime({ offset: true }),
   content: z.string().min(1).max(100_000),
   mediaIds: z.array(z.uuid()).max(10).default([]),
-  channels: z.array(z.strictObject({ channelId: z.uuid(), settings: settings.default({}) })).min(1).max(20),
+  // `content` on a channel replaces the post's for that channel only.
+  channels: z.array(z.strictObject({ channelId: z.uuid(), settings: settings.default({}), content: z.string().min(1).max(100_000).optional() })).min(1).max(20),
 })
 
 /** A comma-separated list of UUIDs in a query string. */

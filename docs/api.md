@@ -11,7 +11,7 @@ JSON (at most 1 MB) except media uploads. Errors have the shape
 | --- | --- |
 | `POST /v1/connect/start` | `{organizationId, providerAppId}` → `{authorizeUrl, state}`. The state is single-use, bound to the tenant and expires in 10 minutes. |
 | `POST /v1/connect/finish` | `{organizationId, state, code}` → `{channels}`. Called by the dashboard's OAuth callback. |
-| `GET /v1/tenants/:org/channels` | `{channels: [{id, platform, kind, name, externalId, status, maxLength, maxMedia, replies, messages}]}`. Tokens are never returned. `replies` and `messages` are `{available, maxLength?, reason?, permission?}`; see "Replies" and "Direct messages". |
+| `GET /v1/tenants/:org/channels` | `{channels: [{id, platform, kind, name, externalId, status, maxLength, maxMedia, lengthUnit, titleMaxLength?, replies, messages}]}`. Tokens are never returned. `maxLength` is the longest post text counted in `lengthUnit` (see "Text length" under Jobs); `titleMaxLength` is the longest `title` setting, in characters, for the kinds that take one (YouTube, Pinterest, Reddit). `replies` and `messages` are `{available, maxLength?, reason?, permission?}`; see "Replies" and "Direct messages". |
 | `POST /v1/tenants/:org/channels/:id/disable` | Removes the credential, and the channel's responses, replies and conversations. `409 channel_busy` while a job, a reply or a message on the channel is unsettled. |
 | `GET`/`PUT /v1/tenants/:org/publishing` | `{paused, pausedChannelIds, maxPostsPerChannelPerDay?}`. A paused tenant or channel accepts no new jobs, and due jobs are cancelled instead of run (`lastError` `paused`; `POST /v1/jobs/restore` brings them back once the pause is lifted). The daily limit (default 10, at most 100) counts non-cancelled, non-failed jobs per channel per calendar day in Europe/Rome. |
 
@@ -52,19 +52,53 @@ route above.
   "approvedByUserId": "…", "approvedAt": "2026-10-20T08:00:00Z",
   "publishAt": "2026-10-21T09:00:00Z",
   "content": "…", "mediaIds": ["…"],
-  "channels": [{ "channelId": "…", "settings": {} }]
+  "channels": [{ "channelId": "…", "settings": {}, "content": "…" }]
 }
 ```
+
+A channel's `content` (optional, 1 to 100,000 characters) replaces the post's
+`content` on that channel only: a caption written for one platform. Without
+it the channel publishes the post's `content`, as before. Each job stores the
+text its channel publishes, and its check hash covers that text, so
+submitting a revision again with a different caption for any channel, or
+adding or removing one, is `409 revision_conflict`.
 
 It creates one job per channel (`201`). Submitting the same revision again with
 identical content returns the existing jobs (`200`); different content or
 channels for that revision is `409 revision_conflict`. Other refusals:
 `publish_at_too_soon` (under five minutes), `paused`, `channel_inactive`,
-`content_too_long`, `too_many_media`, `invalid_settings`, `daily_limit`,
+`content_too_long` (`detail`: `channelId`, `length`, `maxLength`,
+`lengthUnit`), `too_many_media`, `invalid_settings`, `daily_limit`,
 `media_required`, `unsupported_media`, `aspect_ratio`, `not_found`, and for
 videos `video_too_large`, `video_too_short`, `video_too_long` and
 `unsupported_codec`. Videos stored before their length and codecs were read
 are checked for size only.
+
+### Text length
+
+Each channel's text is checked against its kind's `maxLength`, counted the
+way the platform counts it (`lengthUnit` in the channel list):
+
+| Kind | `maxLength` | `lengthUnit` |
+| --- | --- | --- |
+| `facebook_page` | 63,206 | `characters` |
+| `instagram_account` | 2,200 | `characters` |
+| `youtube_channel` (the description) | 5,000 | `bytes` |
+| `x_account` | 280 | `x_weighted` |
+| browser kinds below | as listed | `characters` |
+
+- `characters` counts Unicode code points: an emoji of one code point is one.
+- `bytes` counts UTF-8 bytes, as the YouTube Data API limits a description.
+- `x_weighted` is X's weighted length (twitter-text v3): the text is NFC
+  normalised; every URL, with `http(s)://`, `www.` or a bare domain with a
+  common TLD, counts 23 whatever its length (t.co); an emoji counts 2,
+  including a whole flag, keycap or ZWJ sequence; code points 0 to 4351
+  (Latin, Greek, Cyrillic and others), U+2000 to U+200D, U+2010 to U+201F and
+  U+2032 to U+2037 count 1; anything else, CJK included, counts 2.
+
+YouTube titles (`title` setting) are 1 to 100 characters (code points).
+OpenAgency Portal counts with a copy of `src/text-length.ts`, so its editor
+shows the same numbers the engine checks.
 
 Facebook Page settings: `{"link": "https://…"}` shares a link with its preview
 card (not combinable with images); `{"unpublished": true}` creates a hidden
@@ -77,7 +111,7 @@ or PNG images and MP4 videos.
 | Kind | Text | Media | Settings |
 | --- | --- | --- | --- |
 | `tiktok_account` | 2,200 | exactly one MP4 | none |
-| `x_account` | 280 (X counts links as 23) | up to 4 images, or one video | none |
+| `x_account` | 280, X's weighted length (links 23, emoji and CJK 2) | up to 4 images, or one video | none |
 | `linkedin_profile`, `linkedin_page` | 3,000 | up to 9 images, or one video | none |
 | `threads_account` | 500 | up to 10 images and videos | none |
 | `pinterest_account` | 500, the Pin's description | exactly one image or video | `board` (required, its exact name), `title` (up to 100), `link` |
